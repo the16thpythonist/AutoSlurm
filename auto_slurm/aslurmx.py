@@ -19,6 +19,7 @@ from rich.style import Style
 from rich.syntax import Syntax
 from rich.padding import Padding
 from auto_slurm.helpers import PATH, TEMPLATE_PATH, TEMPLATE_ENV
+from auto_slurm.helpers import open_file_in_editor
 from auto_slurm.helpers import get_version
 from auto_slurm.helpers import create_slurm_jobs
 from auto_slurm.config import AutoSlurmConfig
@@ -199,20 +200,21 @@ class ASlurm(click.RichGroup):
         self.rich_logo = RichLogo()
         self.rich_help = RichHelp()
         
-        # 0) attribute setup
+        ## --- attribute setup ---
         
         # This dict will store the global options that are passed to the aslurm base command 
         # such as the name of the config to use etc.
         self.options: dict[str, any] = {}
         
-        # 1) registering commands
+        ## --- registering commands ---
         # The individual commands are registered
         self.add_command(self.cmd_command)
         
         self.config_group.add_command(self.list_configs_command)
+        self.config_group.add_command(self.edit_configs_command)
         self.add_command(self.config_group)
         
-        # 2) initialization
+        ## --- initialization ---
         # The following section of the constructor performs common initialization tasks which 
         # will be required for all the commands.
         
@@ -244,7 +246,7 @@ class ASlurm(click.RichGroup):
             os.path.join(PATH, 'configs')
         ]
         
-        # 3) template environment update
+        ## --- template environment update ---
         
         # Add a custom templates folder (e.g., ~/.aslurm/templates) as the highest-priority source
         custom_templates_folder = self.aslurm_config.templates_folder_path
@@ -256,6 +258,11 @@ class ASlurm(click.RichGroup):
             ])
     
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        """
+        This method overrides the default "format_help" function of the click.Group class.
+        This method is used to override the help string that is printed for the --help 
+        option of the overall group.
+        """
         # Before printing the help text we want to print the logo
         rich.print(self.rich_logo)
         
@@ -279,7 +286,7 @@ class ASlurm(click.RichGroup):
         """
         Outputs a list of all the available configurations
         """
-        # 1) config file discovery
+        ## --- config file discovery ---
         # This data structure will store the mapping between the name of a config file 
         # and the absolute string path to the file itself.
         config_name_path_dict: dict[str, str] = {}
@@ -297,7 +304,7 @@ class ASlurm(click.RichGroup):
             except (FileNotFoundError, NotADirectoryError, OSError):
                 continue
 
-        # 2) config file loading
+        ## --- config file loading ---
         # In the next step we go through the previous mapping and actually load the content of these 
         # config files into another dictionary.
         
@@ -310,10 +317,48 @@ class ASlurm(click.RichGroup):
             except Exception as e:
                 click.echo(f"Failed to load {config_path}: {e}", err=True)
             
-        # 3) Display the table
+        ## --- Display the table ---
         print()
         rich_config_list = RichConfigList(config_map=config_name_content_dict)
         rich.print(rich_config_list)
+        
+    @click.command('edit', short_help='Edit a configuration file.')
+    @click.argument('config_name', type=str)
+    @click.pass_obj
+    def edit_configs_command(self, config_name: str):
+        """
+        Open the config file identified by the given CONFIG_NAME in the default text editor.
+        """
+        
+        ## --- config file discovery ---
+        # This data structure will store the mapping between the name of a config file 
+        # and the absolute string path to the file itself.
+        config_name_path_dict: dict[str, str] = {}
+
+        for source_path in self.config_source_paths:
+            
+            try:
+                for file_name in os.listdir(source_path):
+                    
+                    if file_name.endswith('.yaml') or file_name.endswith('.yml'):
+                        # We want to use the name of the config file without the extension as the key.
+                        config_name_ = file_name.rsplit('.', 1)[0]
+                        # We store the absolute path to the config file as the value.
+                        config_name_path_dict[config_name_] = os.path.join(source_path, file_name)
+            except (FileNotFoundError, NotADirectoryError, OSError):
+                continue
+            
+        ## --- edit config file ---
+        # We can retrieve the path oto the config file itself using the data structure that we defined above
+        # and then use the function to open that file in a text editor.
+        
+        if config_name not in config_name_path_dict:
+            click.secho(f'⚠️ Config file "{config_name}" not found in any of the config source paths.', fg='red')
+            sys.exit(1)
+            
+        config_path: str = config_name_path_dict[config_name]
+        # This function will open the given config file in the default text editor.
+        open_file_in_editor(config_path)
     
     # == "cmd" commands ==
     # Commands to actually pass custom things to be scheduled in slurm.

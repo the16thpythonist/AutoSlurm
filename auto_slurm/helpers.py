@@ -1,6 +1,8 @@
 import time
 import os
 import pathlib
+import platform
+import subprocess
 
 import jinja2 as j2
 
@@ -90,6 +92,24 @@ def get_version() -> str:
         version: str = file.read().strip()
         
     return version
+
+
+def open_file_in_editor(file_path: str) -> None:
+    """
+    Opens the specified file in the system's default text editor.
+    
+    :param file_path: The path to the file to be opened.
+    
+    :returns: None
+    """
+    
+    # Check the OS and open the file with the system default editor
+    if platform.system() == 'Windows':
+        os.startfile(file_path)  # Windows
+    elif platform.system() == 'Darwin':
+        subprocess.run(['open', file_path])  # macOS
+    else:
+        subprocess.run(['xdg-open', file_path])  # Linux
 
 
 def create_slurm_jobs(
