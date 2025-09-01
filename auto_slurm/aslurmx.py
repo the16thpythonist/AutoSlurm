@@ -689,6 +689,7 @@ class ASlurmSubmitter:
                  randomize: bool = False,
                  logger: logging.Logger = NULL_LOGGER,
                  dry_run: bool = False,
+                 overwrite_fillers: dict[str, str] = {},
                  archive_path: str = os.getcwd(),
                  ):
         """
@@ -762,6 +763,7 @@ class ASlurmSubmitter:
         self.batch_size = batch_size
         self.randomize = randomize
         self.logger = logger
+        self.overwrite_fillers = overwrite_fillers
         
         ## --- computed properties ---
         
@@ -771,7 +773,7 @@ class ASlurmSubmitter:
         
         self.options = {
             'config_name':          config_name,
-            'overwrite_fillers':    '',
+            'overwrite_fillers':    overwrite_fillers,
             'same':                 False,
             'gpus_per_task':        None, 
             'num_gpus':             None,

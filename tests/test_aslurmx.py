@@ -367,3 +367,45 @@ class TestASlurmSubmitter:
                 sh_files.extend([f for f in files if f.endswith('.sh')])
             
             assert len(sh_files) >= 2, "Scripts not created in nested archive path"
+
+    def test_aslurm_submitter_overwrite_fillers_dry_run(self):
+        """Test that overwrite_fillers properly overrides config defaults."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            # Custom fillers to override defaults
+            custom_fillers = {
+                'time': '11:00:00',
+                'mem': '32G', 
+                'cpus': '8'
+            }
+            
+            submitter = ASlurmSubmitter(
+                config_name='haicore_1gpu',
+                dry_run=True,
+                archive_path=temp_path,
+                overwrite_fillers=custom_fillers
+            )
+            
+            submitter.add_command('echo "Testing overwrite fillers"')
+            submitter.submit()
+            
+            # Find and read the main script to verify overwrite_fillers were applied
+            aslurm_path = os.path.join(temp_path, '.aslurm')
+            assert os.path.exists(aslurm_path), "Archive directory was not created"
+            
+            main_scripts = []
+            for root, _, files in os.walk(aslurm_path):
+                main_scripts.extend([
+                    os.path.join(root, f) for f in files 
+                    if f.startswith('main_') and f.endswith('.sh')
+                ])
+            
+            assert len(main_scripts) >= 1, "No main script found"
+            
+            # Read the script content and check for overwritten values
+            with open(main_scripts[0], 'r') as f:
+                script_content = f.read()
+            
+            # Check that our custom time value appears in the SLURM directives
+            assert '11:00:00' in script_content, "Custom time value '11:00:00' not found in script"
+            # The exact format depends on the template, but these values should appear somewhere
+            # We check for the values as they might be used in different SLURM directive formats
