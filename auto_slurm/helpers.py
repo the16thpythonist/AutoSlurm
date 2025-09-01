@@ -5,9 +5,13 @@ import platform
 import subprocess
 import logging
 import random
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
+from io import StringIO
 from typing import Iterator, Iterable, TypeVar, List
 
+import rich_click
 import jinja2 as j2
+from rich.console import Console
 
 T = TypeVar('T')
 
@@ -258,3 +262,9 @@ def create_slurm_jobs(
     )
     
     return main_script_content, resume_script_content
+
+
+@contextmanager
+def suppress_console_output():
+    with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+        yield

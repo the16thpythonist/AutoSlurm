@@ -7,11 +7,14 @@ import uuid
 import logging
 import math
 import rich_click as click
+import io
+from contextlib import redirect_stdout
 
 import rich
 import yaml
 import hydra
 import omegaconf
+from tqdm import tqdm
 from more_itertools import chunked
 from rich.pretty import pprint
 from rich.table import Table
@@ -887,11 +890,23 @@ class ASlurmSubmitter:
             submit_batch(): Internal method for submitting individual batches
         """
         
-        for commands in Batched(self.commands, batch_size=self.batch_size, randomize=self.randomize):
-            
-            # This method will actually submit the given batch of commands as a single SLURM job to the 
-            # SLURM scheduler of the operating system using the existing CLI interface.
-            self.submit_batch(commands)
+        num_jobs = self.count_jobs()
+        
+        with tqdm(total=num_jobs, desc='Submitting jobs', unit='job') as pbar:
+        
+            batched_commands = Batched(
+                self.commands, 
+                batch_size=self.batch_size, 
+                randomize=self.randomize
+            )
+            for commands in batched_commands:
+                
+                with redirect_stdout(io.StringIO()):
+                    # This method will actually submit the given batch of commands as a single SLURM job to the 
+                    # SLURM scheduler of the operating system using the existing CLI interface.
+                    self.submit_batch(commands)
+                
+                pbar.update(1)
     
     def submit_batch(self, commands: list[str]) -> None:
         """

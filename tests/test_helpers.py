@@ -1,10 +1,12 @@
 import os
 import pytest
 import jinja2 as j2
+from io import StringIO
 
 from .utils import ASSETS_PATH, ARTIFACTS_PATH
 from auto_slurm.helpers import TEMPLATE_ENV
-from auto_slurm.helpers import create_slurm_jobs, Batched
+from auto_slurm.helpers import create_slurm_jobs, Batched, suppress_rich_click_output
+import rich_click
 
 
 def test_saving_artifacts():
@@ -243,3 +245,5 @@ class TestBatched:
         expected = [[0, 1], [2, 3], [4]]
         
         assert batches == expected
+
+
