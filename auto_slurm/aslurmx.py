@@ -691,6 +691,7 @@ class ASlurmSubmitter:
                  dry_run: bool = False,
                  overwrite_fillers: dict[str, str] = {},
                  archive_path: str = os.getcwd(),
+                 parallel: bool = False,
                  ):
         """
         Initialize an ASlurmSubmitter instance with the specified configuration and options.
@@ -764,6 +765,7 @@ class ASlurmSubmitter:
         self.randomize = randomize
         self.logger = logger
         self.overwrite_fillers = overwrite_fillers
+        self.parallel = parallel
         
         ## --- computed properties ---
         
@@ -970,7 +972,10 @@ class ASlurmSubmitter:
         # First of all we need to join the individual commands into a single command string since the 
         # submission as a batch means that all the elements of the batch need to end up as a single SLURM 
         # job in the end.
-        command_string: str = '\n'.join(commands)
+        if self.parallel:
+            command_string: str = ' &\n '.join(commands)
+        else:
+            command_string: str = ' ; '.join(commands)
         
         # --- 2. submit using the CLI ---
         # This command will use the existing CLI interface to submit the given command string as an 
