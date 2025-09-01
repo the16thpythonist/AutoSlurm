@@ -3,17 +3,99 @@ import os
 import pathlib
 import platform
 import subprocess
+import logging
+import random
+from typing import Iterator, Iterable, TypeVar, List
 
 import jinja2 as j2
 
+T = TypeVar('T')
+
+# The absolute path to the parent directory where this file is located in.
 PATH: str = pathlib.Path(__file__).parent.resolve()
 
+# This is the path to the templates directory which contains all the jinja2 template files
 TEMPLATE_PATH: str = os.path.join(PATH, "templates")
 
+# This is the template environment based on that template folder. This environment object can 
+# be used to easily load the corresponding Template instances based on the files in that folder.
 TEMPLATE_ENV = j2.Environment(
     loader=j2.FileSystemLoader(TEMPLATE_PATH),
     autoescape=j2.select_autoescape(),
 )
+
+# This can be used as a default logger wherever a logger can be supplied as a parameter/argument
+# This logger will simply ignore all the logging calls but crucially it can be handled as any 
+# oher logger instance - reducing the need for if logger is not None: checks everywhere
+NULL_LOGGER = logging.getLogger("auto_slurm")
+NULL_LOGGER.addHandler(logging.NullHandler())
+
+
+class Batched:
+    """
+    A generator wrapper that yields elements from an iterable in batches of a specified size.
+    
+    This class takes an iterable and a batch size and yields sublists containing elements
+    from the original iterable. The last batch may contain fewer elements if the total
+    number of elements is not evenly divisible by the batch size.
+    
+    The class also supports optional randomization of elements before batching, which
+    creates a shuffled copy of the original iterable without mutating the original.
+    
+    Example:
+        >>> numbers = list(range(10))
+        >>> for batch in Batched(numbers, batch_size=3):
+        ...     print(batch)
+        [0, 1, 2]
+        [3, 4, 5]
+        [6, 7, 8]
+        [9]
+        
+        >>> for batch in Batched(numbers, batch_size=3, randomize=True):
+        ...     for element in batch:
+        ...         print(element)  # Elements will be in random order
+    """
+    
+    def __init__(self, iterable: Iterable[T], batch_size: int, randomize: bool = False):
+        """
+        Initialize the Batched generator wrapper.
+        
+        Args:
+            iterable (Iterable[T]): The input iterable to be batched (e.g., list, tuple, generator).
+            batch_size (int): The size of each batch. Must be greater than 0.
+            randomize (bool, optional): If True, randomize the order of elements before batching.
+                                      Defaults to False. Does not mutate the original iterable.
+                                      
+        Raises:
+            ValueError: If batch_size is less than or equal to 0.
+        """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than 0")
+            
+        self.iterable = iterable
+        self.batch_size = batch_size
+        self.randomize = randomize
+    
+    def __iter__(self) -> Iterator[List[T]]:
+        """
+        Iterator method that yields batches of elements.
+        
+        Yields:
+            List[T]: A list containing up to batch_size elements from the original iterable.
+                    The last batch may contain fewer elements.
+        """
+        # Convert to list to allow for potential randomization and batching
+        elements = list(self.iterable)
+        
+        # If randomize is True, create a shuffled copy without mutating the original
+        if self.randomize:
+            elements = elements.copy()
+            random.shuffle(elements)
+        
+        # Yield batches of the specified size
+        for i in range(0, len(elements), self.batch_size):
+            yield elements[i:i + self.batch_size]
+
 
 class RunTimer:
     def __init__(self, time_limit: int = 48):

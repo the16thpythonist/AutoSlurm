@@ -8,3 +8,4 @@ tests/artifacts/
 slurm-*
 _*
 uv.lock
+build/*

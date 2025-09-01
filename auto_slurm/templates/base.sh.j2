@@ -29,7 +29,7 @@ source activate {{ fillers.conda_env }}
 source "$(realpath {{ fillers.venv }})/bin/activate"
 {% endif %}
 {# We can control the max number of threads used for a number of different applications by setting these env variables #}
-{% if filles.num_threads %}
+{% if fillers.num_threads %}
 export OMP_NUM_THREADS={{ fillers.num_threads }}
 export MKL_NUM_THREADS={{ fillers.num_threads }}
 export OPENBLAS_NUM_THREADS={{ fillers.num_threads }}

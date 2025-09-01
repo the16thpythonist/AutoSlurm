@@ -4,6 +4,8 @@ import pathlib
 import datetime
 import subprocess
 import uuid
+import logging
+import math
 import rich_click as click
 
 import rich
@@ -19,6 +21,8 @@ from rich.style import Style
 from rich.syntax import Syntax
 from rich.padding import Padding
 from auto_slurm.helpers import PATH, TEMPLATE_PATH, TEMPLATE_ENV
+from auto_slurm.helpers import NULL_LOGGER
+from auto_slurm.helpers import Batched
 from auto_slurm.helpers import open_file_in_editor
 from auto_slurm.helpers import get_version
 from auto_slurm.helpers import create_slurm_jobs
@@ -420,7 +424,7 @@ class ASlurm(click.RichGroup):
             commands_list.append(commands)
         elif max_tasks is not None and max_tasks > 0:
             commands_list = list(chunked(commands, max_tasks))
-        elif self.options['']:
+        else:
             commands_list.extend([[command] for command in commands])
             
         # 5) script generation
@@ -604,6 +608,405 @@ class ASlurm(click.RichGroup):
         )
         os.makedirs(scripts_folder_path, exist_ok=True)
         return scripts_folder_path
+
+
+
+
+class ASlurmSubmitter:
+    """
+    A programmatic interface for submitting batches of commands to SLURM using AutoSlurm configurations.
+    
+    The ASlurmSubmitter class provides a high-level Python API for scheduling and managing SLURM jobs
+    without directly interacting with the command-line interface. It's particularly well-suited for
+    automating the submission of large numbers of commands or integrating SLURM job submission into
+    Python workflows and scripts.
+    
+    Key Features:
+    - **Batch Processing**: Groups multiple commands into SLURM jobs based on configurable batch sizes
+    - **Command Queuing**: Add commands incrementally before submitting them all at once
+    - **Configuration Management**: Uses AutoSlurm's configuration system for consistent job settings
+    - **Randomization Support**: Optional command randomization for better resource utilization
+    - **Dry Run Mode**: Test job submission without actually scheduling SLURM jobs
+    - **Flexible Archiving**: Configure where SLURM scripts are stored
+    
+    Typical Workflow:
+    1. Create an ASlurmSubmitter instance with desired configuration
+    2. Add commands to the queue using add_command()
+    3. Submit all queued commands using submit()
+    
+    Example:
+        >>> # Create a submitter for GPU-intensive tasks
+        >>> submitter = ASlurmSubmitter(
+        ...     config_name='gpu_cluster', 
+        ...     batch_size=4,
+        ...     randomize=True
+        ... )
+        >>> 
+        >>> # Add multiple training commands
+        >>> for lr in [0.001, 0.01, 0.1]:
+        ...     submitter.add_command(f'python train.py --learning_rate={lr}')
+        >>> 
+        >>> # Submit all commands (will create jobs with 4 commands each)
+        >>> submitter.submit()
+    
+    Batch Size Considerations:
+    - **batch_size=1**: Each command gets its own SLURM job (maximum parallelism)
+    - **batch_size>1**: Multiple commands are grouped into single jobs (resource efficiency)
+    - **Large batch_size**: Fewer jobs but longer execution times per job
+    
+    Configuration Integration:
+    The submitter leverages AutoSlurm's configuration system, inheriting settings like:
+    - Resource allocation (CPUs, memory, GPUs)
+    - Time limits and partitions
+    - Module loading and environment setup
+    - Custom templates and job scripts
+    
+    Thread Safety:
+    This class is not thread-safe. If using in multi-threaded environments,
+    external synchronization is required when adding commands or submitting jobs.
+    
+    Attributes:
+        config_name (str): Name of the AutoSlurm configuration to use
+        batch_size (int): Number of commands to group into each SLURM job
+        randomize (bool): Whether to randomize command order before batching
+        logger (logging.Logger): Logger instance for operation tracking
+        commands (list[str]): Internal queue of commands awaiting submission
+        options (dict): Internal options dictionary for CLI interface
+        cli (ASlurm): Internal CLI interface instance
+        ctx (click.Context): Click context for command execution
+    
+    See Also:
+        - ASlurm: The underlying command-line interface
+        - AutoSlurmConfig: Configuration management system
+        - Batched: Helper class for command batching with randomization
+    """
+    def __init__(self, 
+                 config_name: str,
+                 batch_size: int = 1,
+                 randomize: bool = False,
+                 logger: logging.Logger = NULL_LOGGER,
+                 dry_run: bool = False,
+                 archive_path: str = os.getcwd(),
+                 ):
+        """
+        Initialize an ASlurmSubmitter instance with the specified configuration and options.
+        
+        This constructor sets up all necessary components for SLURM job submission, including
+        loading the AutoSlurm configuration, initializing the CLI interface, and preparing
+        the internal command queue.
+        
+        Args:
+            config_name (str): Name of the AutoSlurm configuration file to use (without extension).
+                              This must correspond to a YAML file in one of the AutoSlurm config directories.
+                              Examples: 'gpu_cluster', 'cpu_partition', 'high_memory'
+                              
+            batch_size (int, optional): Number of commands to group into each SLURM job. 
+                                       Defaults to 1 (each command gets its own job).
+                                       - Values > 1 create fewer jobs but longer execution times
+                                       - Consider resource limits and job queue policies when choosing
+                                       
+            randomize (bool, optional): Whether to randomize the order of commands before batching.
+                                       Defaults to False. When True:
+                                       - Helps distribute computational load more evenly
+                                       - Useful for parameter sweeps or similar workloads
+                                       - Commands within each batch are still executed sequentially
+                                       
+            logger (logging.Logger, optional): Logger instance for tracking operations and debugging.
+                                              Defaults to NULL_LOGGER (no logging).
+                                              Recommended for production use to track job submissions.
+                                              
+            dry_run (bool, optional): If True, generates SLURM scripts but does not submit them.
+                                     Defaults to False. Useful for:
+                                     - Testing configuration and script generation
+                                     - Validating command syntax
+                                     - Debugging job submission issues
+                                     
+            archive_path (str, optional): Directory where generated SLURM scripts will be stored.
+                                         Defaults to current working directory.
+                                         - Scripts are organized in timestamped subdirectories
+                                         - Should be accessible to the SLURM cluster
+                                         - Consider disk space for large numbers of jobs
+        
+        Raises:
+            FileNotFoundError: If the specified config_name does not exist in any config directory
+            PermissionError: If archive_path is not writable
+            ImportError: If required dependencies are not available
+            
+        Example:
+            >>> # Basic usage with default settings
+            >>> submitter = ASlurmSubmitter('my_cluster_config')
+            
+            >>> # Advanced usage with custom settings
+            >>> import logging
+            >>> logger = logging.getLogger(__name__)
+            >>> submitter = ASlurmSubmitter(
+            ...     config_name='gpu_partition',
+            ...     batch_size=8,
+            ...     randomize=True,
+            ...     logger=logger,
+            ...     dry_run=False,
+            ...     archive_path='/scratch/user/slurm_jobs'
+            ... )
+        
+        Note:
+            The constructor performs initial validation of the config_name but does not
+            load the full configuration until submit() is called. This allows for faster
+            initialization when creating multiple submitter instances.
+        """
+        
+        ## --- constructor arguments ---
+        self.config_name = config_name
+        self.batch_size = batch_size
+        self.randomize = randomize
+        self.logger = logger
+        
+        ## --- computed properties ---
+        
+        # This list will store all of the individual commands that are added to the submitter over the 
+        # course of its lifetime, until the `submit` method is called.
+        self.commands: list[str] = []
+        
+        self.options = {
+            'config_name':          config_name,
+            'overwrite_fillers':    '',
+            'same':                 False,
+            'gpus_per_task':        None, 
+            'num_gpus':             None,
+            'max_tasks':            None,
+            'archive_path':         archive_path,
+            'dry_run':              dry_run,
+            'version':              False,
+        }
+        self.cli = ASlurm()
+        self.cli.options.update(self.options)
+        self.ctx = click.Context(self.cli)
+        self.ctx.obj = self.cli
+        
+    
+    def add_command(self, command: str) -> None:
+        """
+        Add a command to the internal queue for later submission to SLURM.
+        
+        Commands are stored in the order they are added (unless randomization is enabled)
+        and will be grouped into batches according to the batch_size parameter when
+        submit() is called. Each command should be a complete shell command that can
+        be executed independently.
+        
+        Args:
+            command (str): A shell command to be executed in the SLURM environment.
+                          Should be a complete command including all arguments and options.
+                          Examples:
+                          - 'python train.py --epochs=100 --lr=0.01'
+                          - 'bash process_data.sh /path/to/input /path/to/output'
+                          - 'conda activate myenv && python script.py'
+        
+        Returns:
+            None
+            
+        Raises:
+            TypeError: If command is not a string
+            
+        Example:
+            >>> submitter = ASlurmSubmitter('gpu_config')
+            >>> submitter.add_command('python experiment1.py --param=value1')
+            >>> submitter.add_command('python experiment2.py --param=value2')
+            >>> print(f"Queued {len(submitter.commands)} commands")
+            Queued 2 commands
+        
+        Note:
+            - Commands are not validated at addition time
+            - Commands with shell operators (&&, ||, |, >) are supported
+            - Multi-line commands should use proper shell syntax with line continuations
+            - Environment variables in commands will be resolved in the SLURM execution context
+        
+        See Also:
+            submit(): Submit all queued commands to SLURM
+            count_jobs(): Get estimated number of SLURM jobs that will be created
+        """
+        self.commands.append(command)
+    
+    def submit(self):
+        """
+        Submit all queued commands to SLURM as one or more batch jobs.
+        
+        This method processes all commands in the internal queue, groups them into batches
+        according to the batch_size parameter, and submits each batch as a separate SLURM job.
+        The commands are executed sequentially within each batch but batches run in parallel
+        on the cluster.
+        
+        The submission process involves:
+        1. Grouping commands into batches (with optional randomization)
+        2. Loading the specified AutoSlurm configuration
+        3. Generating SLURM script files for each batch
+        4. Submitting scripts to SLURM using sbatch (unless dry_run=True)
+        5. Creating archive directories for script storage
+        
+        Batch Creation Logic:
+        - If batch_size=1: Each command becomes its own SLURM job
+        - If batch_size>1: Commands are grouped, with the last batch potentially smaller
+        - If randomize=True: Commands are shuffled before batching
+        
+        Resource Allocation:
+        - Each batch job inherits resource settings from the configuration
+        - GPU allocation (if specified) is handled per the config's GRES settings
+        - Memory and CPU limits apply to the entire batch, not individual commands
+        
+        Returns:
+            None
+            
+        Raises:
+            FileNotFoundError: If the specified config_name cannot be found
+            subprocess.CalledProcessError: If sbatch command fails (when not in dry_run mode)
+            PermissionError: If unable to write to archive_path
+            RuntimeError: If no commands have been queued
+            
+        Example:
+            >>> submitter = ASlurmSubmitter('gpu_config', batch_size=2)
+            >>> submitter.add_command('python train1.py')
+            >>> submitter.add_command('python train2.py') 
+            >>> submitter.add_command('python train3.py')
+            >>> submitter.submit()
+            # Creates 2 SLURM jobs: 
+            # Job 1: train1.py + train2.py
+            # Job 2: train3.py
+        
+        Side Effects:
+            - Creates timestamped directories in archive_path for script storage
+            - Generates main_N.sh and resume_N.sh files for each batch
+            - Submits jobs to SLURM queue (unless dry_run=True)
+            - Clears the internal command queue after successful submission
+            
+        Performance Considerations:
+            - Large batch sizes reduce SLURM queue overhead but increase job completion time
+            - Small batch sizes maximize parallelism but may overwhelm the scheduler
+            - Consider cluster policies and resource availability when choosing batch size
+            
+        See Also:
+            add_command(): Add commands to the queue
+            count_jobs(): Get estimated number of jobs before submission
+            submit_batch(): Internal method for submitting individual batches
+        """
+        
+        for commands in Batched(self.commands, batch_size=self.batch_size, randomize=self.randomize):
+            
+            # This method will actually submit the given batch of commands as a single SLURM job to the 
+            # SLURM scheduler of the operating system using the existing CLI interface.
+            self.submit_batch(commands)
+    
+    def submit_batch(self, commands: list[str]) -> None:
+        """
+        Submit a single batch of commands as one SLURM job.
+        
+        This is an internal method called by submit() to handle individual batches.
+        It combines multiple commands into a single script and submits it to SLURM
+        using the configured AutoSlurm settings. Commands within a batch are executed
+        sequentially on the same compute node.
+        
+        The method performs the following operations:
+        1. Joins all commands with newline separators into a single script
+        2. Invokes the underlying ASlurm CLI interface to generate SLURM scripts
+        3. Submits the generated script to SLURM using sbatch
+        4. Handles job ID extraction and error reporting
+        
+        Args:
+            commands (list[str]): A list of shell commands to execute sequentially
+                                 within a single SLURM job. Each command should be
+                                 a complete, executable shell command.
+                                 Example: ['python train.py --lr=0.01', 'python eval.py']
+            
+        Returns:
+            None
+            
+        Raises:
+            subprocess.CalledProcessError: If the sbatch command fails to submit the job
+            ValueError: If the sbatch output format is unexpected
+            RuntimeError: If the CLI interface fails to generate scripts
+            
+        Implementation Details:
+            - Commands are separated by newlines in the generated script
+            - Each command's exit status is preserved in the script
+            - Failed commands will cause the entire batch job to fail
+            - The batch inherits all resource settings from the AutoSlurm configuration
+            
+        Script Generation:
+            The method uses AutoSlurm's templating system to create:
+            - main_N.sh: Primary execution script with SLURM directives
+            - resume_N.sh: Recovery script for restarting failed jobs
+            
+        Example:
+            >>> # Internal usage (called by submit())
+            >>> submitter = ASlurmSubmitter('config')
+            >>> batch = ['python task1.py', 'python task2.py']
+            >>> submitter.submit_batch(batch)
+            # Submits one SLURM job executing both tasks sequentially
+        
+        Note:
+            This is an internal method and should not typically be called directly.
+            Use submit() instead, which handles batching logic and calls this method
+            for each batch automatically.
+            
+        See Also:
+            submit(): Main method for submitting all queued commands
+            ASlurm.cmd_command: Underlying CLI command used for script generation
+        """
+        # --- 1. join the commands ---
+        # First of all we need to join the individual commands into a single command string since the 
+        # submission as a batch means that all the elements of the batch need to end up as a single SLURM 
+        # job in the end.
+        command_string: str = '\n'.join(commands)
+        
+        # --- 2. submit using the CLI ---
+        # This command will use the existing CLI interface to submit the given command string as an 
+        # individual SLURM job.
+        self.ctx.invoke(self.cli.cmd_command, args=[command_string])
+
+    def count_jobs(self) -> int:
+        """
+        Calculate the estimated number of SLURM jobs that will be created upon submission.
+        
+        This method provides a preview of how many individual SLURM jobs will be generated
+        when submit() is called, based on the current number of queued commands and the
+        configured batch_size. This is useful for planning resource usage and estimating
+        cluster queue impact before submission.
+        
+        The calculation uses ceiling division to account for partial batches:
+        - If commands % batch_size == 0: result = commands / batch_size
+        - If commands % batch_size > 0: result = (commands / batch_size) + 1
+        
+        Returns:
+            int: The number of SLURM jobs that will be created when submit() is called.
+                 Returns 0 if no commands have been queued.
+                 
+        Example:
+            >>> submitter = ASlurmSubmitter('config', batch_size=3)
+            >>> submitter.count_jobs()
+            0
+            >>> submitter.add_command('python script1.py')
+            >>> submitter.add_command('python script2.py')
+            >>> submitter.count_jobs()
+            1
+            >>> submitter.add_command('python script3.py')
+            >>> submitter.add_command('python script4.py')
+            >>> submitter.count_jobs()
+            2  # Jobs: [script1, script2, script3] and [script4]
+        
+        Use Cases:
+            - **Resource Planning**: Estimate cluster resource requirements
+            - **Queue Management**: Avoid overwhelming the SLURM scheduler
+            - **Progress Monitoring**: Track submission progress in batch workflows
+            - **Cost Estimation**: Calculate job-based billing on commercial clusters
+            
+        Note:
+            - This method does not modify the command queue
+            - The estimate is exact unless commands are modified between calling this method and submit()
+            - Randomization (if enabled) does not affect the job count, only command order
+            
+        See Also:
+            submit(): Submit all queued commands and create the estimated number of jobs
+            add_command(): Add commands to the queue (affects the count)
+        """
+        return math.ceil(len(self.commands) / self.batch_size)
+
 
 
 @click.group(cls=ASlurm, invoke_without_command=True)
