@@ -33,8 +33,10 @@ from auto_slurm.config import AutoSlurmConfig
 from auto_slurm.config import GeneralConfig, Config
 from jinja2 import FileSystemLoader, ChoiceLoader
 
-
 class RichLogo:
+    """
+    A rich display which will show the ASlurmX logo in ASCII art when printed.
+    """
     
     STYLE = Style(bold=True, color='white')
     
@@ -48,6 +50,10 @@ class RichLogo:
 
 
 class RichHelp:
+    """
+    A rich display which will show the "help" section for the ASlurmX CLI tool when printed.
+    This help sections contains special formatting for the various example commands.
+    """
     
     def __rich_console__(self, console, options):
         yield "AutoSlurm Command Line Interface X.\n"
@@ -86,6 +92,7 @@ class RichConfigList:
         
         self.column_names: list[str] = [
             'Config Name',
+            'Partition',
             'Time',
             'Memory',
             'CPUs',
@@ -97,12 +104,16 @@ class RichConfigList:
             if 'default_fillers' in config_content:
                 row: list = [
                     config_name,
+                    config_content['default_fillers'].get('partition', 'N/A'),
                     config_content['default_fillers'].get('time', 'N/A'),
                     config_content['default_fillers'].get('mem', 'N/A'),
                     config_content['default_fillers'].get('cpus', 'N/A'),
                     config_content['default_fillers'].get('gres', 'N/A'),
                 ]
                 self.rows.append(row)
+        
+        # Sort rows alphabetically by config name (first column)
+        self.rows.sort(key=lambda row: row[0])
         
     def __rich_console__(self, console, options):
         
@@ -219,6 +230,7 @@ class ASlurm(click.RichGroup):
         
         self.config_group.add_command(self.list_configs_command)
         self.config_group.add_command(self.edit_configs_command)
+        self.config_group.add_command(self.where_configs_command)
         self.add_command(self.config_group)
         
         ## --- initialization ---
@@ -366,6 +378,45 @@ class ASlurm(click.RichGroup):
         config_path: str = config_name_path_dict[config_name]
         # This function will open the given config file in the default text editor.
         open_file_in_editor(config_path)
+    
+    @click.command('where', short_help='Show the location where config files are stored.')
+    @click.pass_obj
+    def where_configs_command(self):
+        """
+        Show the location where all the config files are being stored in.
+        """
+        # Create a rich table to display the config paths
+        table = Table(
+            show_header=True,
+            header_style="bold magenta",
+            expand=True,
+            title="Config File Storage Locations"
+        )
+        table.add_column("Priority", style="bold cyan", width=8)
+        table.add_column("Path", style="dim")
+        table.add_column("Status", justify="center", width=10)
+        
+        for i, path in enumerate(self.config_source_paths, 1):
+            # Check if the path exists and add appropriate status
+            if os.path.exists(path):
+                status = "[green]✓ Exists[/green]"
+            else:
+                status = "[yellow]⚠ Missing[/yellow]"
+            
+            # Show priority (1 = highest priority)
+            priority = str(i)
+            if i == 1:
+                priority = f"[bold]{priority}[/bold] (highest)"
+            
+            table.add_row(priority, path, status)
+        
+        rich.print()
+        rich.print(table)
+        
+        # Add helpful explanation
+        text = Text("\nNote: Config files in higher priority locations override those in lower priority locations.", 
+                   style="dim italic")
+        rich.print(Padding(text, (0, 2)))
     
     # == "cmd" commands ==
     # Commands to actually pass custom things to be scheduled in slurm.
