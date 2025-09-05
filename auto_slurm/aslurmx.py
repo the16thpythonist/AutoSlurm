@@ -491,13 +491,29 @@ class ASlurm(click.RichGroup):
         
         for job_index, _commands in enumerate(commands_list):
             
+            # --- assembling the fillers ---
             # The filler values that we'll use in the templates to assemble the scripts are 
             # a combination of the global filler values as defaults which are then overwritten 
             # by the values that are specified in the specific config file.
             fillers: dict[str, any] = self.general_config.global_fillers
+            
+            # --- default venv discorvery ---
+            # As a small convenience feature we want to automatically detect if there is a venv file in 
+            # the current working directory of where the command was invoked and then add that as 
+            # the default filler if possible.
+            # We specifically do this as the first step because we definitely want the user 
+            # supplied value to have higher priority and replace this default.
+            venv_path: str | None = self.discover_venv(os.getcwd())
+            if venv_path:
+                fillers['venv'] = venv_path
+            
+            # The fillers from the global defaults and the command line.
             fillers.update(config.default_fillers)
             fillers.update(self.options['overwrite_fillers'])
             
+            # --- creating SLURM scripts ---
+            # Here we actually create the slurm scripts using the helper function. This helper function 
+            # will fill the jinja templates with the content based on the fillers and the commands.
             main_content, resume_content = create_slurm_jobs(
                 commands=_commands,
                 fillers=fillers,
@@ -515,6 +531,8 @@ class ASlurm(click.RichGroup):
             with open(resume_path, 'w') as resume_file:
                 resume_file.write(resume_content)
                 
+            # After writing the files - only if this is NOT a dry run - we use subprocess to actually start 
+            # the job using sbatch.
             if not self.options['dry_run']:
                 
                 try:
@@ -541,6 +559,73 @@ class ASlurm(click.RichGroup):
     # == Helper methods ==
     # The following methods do not implement any commands but rather provide utility functions
     # that are used by the commands above.
+        
+    def discover_venv(self, path: str) -> str | None:
+        """
+        Discover and return the path to a virtual environment folder within the specified directory.
+        
+        This method searches for common virtual environment directory names within the given path
+        and returns the absolute path to the first virtual environment found. It looks for standard
+        virtual environment folder names including 'venv', '.venv', 'env', '.env', and 'virtualenv'.
+        The method prioritizes hidden directories (starting with '.') as they are commonly used
+        for virtual environments to keep them out of regular file listings.
+        
+        Args:
+            path (str): The directory path to search for virtual environment folders.
+                       Should be an absolute or relative path to an existing directory.
+                       
+        Returns:
+            str | None: The absolute path to the discovered virtual environment directory,
+                       or None if no virtual environment is found in the specified path.
+                       
+        Example:
+            >>> # Search for venv in current working directory
+            >>> venv_path = self.discover_venv('/home/user/project')
+            >>> print(venv_path)
+            '/home/user/project/.venv'
+            
+            >>> # No venv found
+            >>> venv_path = self.discover_venv('/home/user/empty_dir')
+            >>> print(venv_path)
+            None
+            
+        Notes:
+            - The method returns the first virtual environment found based on priority order
+            - Priority order: .venv, venv, .env, env, virtualenv
+            - Only returns directories that actually exist and are accessible
+            - Does not validate that the discovered directory is a valid Python virtual environment
+            - Case-sensitive search (looks for exact name matches)
+            
+        Raises:
+            OSError: If the specified path does not exist or is not accessible
+            
+        See Also:
+            create_scipts_folder: Creates directories for SLURM script storage
+            load_config: Loads configuration files from multiple source paths
+        """
+        # Define common virtual environment directory names in priority order
+        # Hidden directories (starting with '.') are prioritized as they're commonly used
+        venv_names = ['.venv', 'venv', '.env', 'env', 'virtualenv']
+        
+        try:
+            # Check if the provided path exists and is a directory
+            if not os.path.isdir(path):
+                return None
+                
+            # Search for virtual environment directories in the specified path
+            for venv_name in venv_names:
+                venv_path = os.path.join(path, venv_name)
+                
+                # Return the absolute path if a virtual environment directory is found
+                if os.path.isdir(venv_path):
+                    return os.path.abspath(venv_path)
+                    
+        except (OSError, PermissionError):
+            # Return None if path is not accessible
+            return None
+            
+        # No virtual environment found
+        return None
         
     def extract_commands_from_args(self, args: list[str]) -> list[str]:
         """
