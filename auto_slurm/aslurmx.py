@@ -297,6 +297,10 @@ class ASlurm(click.RichGroup):
     @click.group('config', short_help='Various commands to interact with the configuration files.')
     @click.pass_obj
     def config_group(self):
+        """
+        Exposes commands to interacti with the individual config files that define the various cluster 
+        environments and their default settings.
+        """
         pass
     
     @click.command('list', short_help='List all the configuration files that are available.')

@@ -3,7 +3,7 @@ defaults:
   - _self_
 
 default_fillers:
-  partition: '<haicore_partition>' # haicore_partition is defined in global_config.yaml
+  partition: 'normal' # haicore_partition is defined in global_config.yaml
   job_name: "haicore"
   time: "72:00:00"
   cpus: "152"
