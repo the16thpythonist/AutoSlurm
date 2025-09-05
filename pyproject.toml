@@ -14,14 +14,15 @@ authors = [
     {name = "Jonas Teufel", email = "jonseb1998@gmail.com"},
 ]
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 dependencies = [
     "hydra-core", 
     "pydantic>=2.5.3", 
     "appdirs>=1.0.0,<=2.0.0",
-    "rich_click>=1.8.0,<=2.0.0",
+    "rich_click>=1.8.8,<=2.0.0",
     "jinja2>=3.0.0,<=4.0.0",
     "more_itertools>=10.0.0,<=11.0.0",
+    "tqdm>=4.0.0,<=5.0.0",
 ]
 
 [project.scripts]

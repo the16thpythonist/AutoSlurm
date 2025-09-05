@@ -510,7 +510,7 @@ class ASlurm(click.RichGroup):
             # The fillers from the global defaults and the command line.
             fillers.update(config.default_fillers)
             fillers.update(self.options['overwrite_fillers'])
-            
+                        
             # --- creating SLURM scripts ---
             # Here we actually create the slurm scripts using the helper function. This helper function 
             # will fill the jinja templates with the content based on the fillers and the commands.
