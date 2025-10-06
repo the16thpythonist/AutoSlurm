@@ -22,6 +22,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.style import Style
 from rich.syntax import Syntax
+from rich.columns import Columns
 from rich.padding import Padding
 from auto_slurm.helpers import PATH, TEMPLATE_PATH, TEMPLATE_ENV
 from auto_slurm.helpers import NULL_LOGGER
@@ -37,16 +38,24 @@ class RichLogo:
     """
     A rich display which will show the ASlurmX logo in ASCII art when printed.
     """
-    
-    STYLE = Style(bold=True, color='white')
-    
+
+    STYLE = Style(bold=True, color="white")
+
     def __rich_console__(self, console, options):
-        logo_path = os.path.join(TEMPLATE_PATH, 'logo.txt')
-        with open(logo_path, mode='r') as file:
-            logo_string: str = file.read()
-            text = Text(logo_string, style=self.STYLE)
-            pad = Padding(text, (1, 1))
-            yield pad
+        text_path = os.path.join(TEMPLATE_PATH, "logo_text.txt")
+        with open(text_path) as file:
+            text_string: str = file.read()
+            text = Text(text_string, style=self.STYLE)
+            
+        image_path = os.path.join(TEMPLATE_PATH, "logo_image.txt")
+        with open(image_path) as file:
+            image_string: str = file.read()
+            # Replace \e with actual escape character and create Text from ANSI
+            ansi_string = image_string.replace('\\e', '\033')
+            image = Text.from_ansi(ansi_string)
+            
+        side_by_side = Columns([image, text], equal=True, padding=(0, 3))
+        yield Padding(side_by_side, (1, 3, 1, 3))
 
 
 class RichHelp:
@@ -766,6 +775,7 @@ class ASlurmSubmitter:
     
     Key Features:
     - **Batch Processing**: Groups multiple commands into SLURM jobs based on configurable batch sizes
+    - **GPU Assignment**: Automatically assign different GPUs to commands within a batch using CUDA_VISIBLE_DEVICES
     - **Command Queuing**: Add commands incrementally before submitting them all at once
     - **Configuration Management**: Uses AutoSlurm's configuration system for consistent job settings
     - **Randomization Support**: Optional command randomization for better resource utilization
@@ -778,19 +788,37 @@ class ASlurmSubmitter:
     3. Submit all queued commands using submit()
     
     Example:
-        >>> # Create a submitter for GPU-intensive tasks
+        >>> # Basic usage: Create a submitter for batch processing
         >>> submitter = ASlurmSubmitter(
-        ...     config_name='gpu_cluster', 
+        ...     config_name='gpu_cluster',
         ...     batch_size=4,
         ...     randomize=True
         ... )
-        >>> 
+        >>>
         >>> # Add multiple training commands
         >>> for lr in [0.001, 0.01, 0.1]:
         ...     submitter.add_command(f'python train.py --learning_rate={lr}')
-        >>> 
+        >>>
         >>> # Submit all commands (will create jobs with 4 commands each)
         >>> submitter.submit()
+
+        >>> # GPU assignment: Distribute commands across GPUs
+        >>> submitter = ASlurmSubmitter(
+        ...     config_name='haicore_4gpu',
+        ...     batch_size=4,
+        ...     gpus_per_task=1  # Assign 1 GPU per command
+        ... )
+        >>>
+        >>> # Add 4 commands - each will get its own GPU (0, 1, 2, 3)
+        >>> for i in range(4):
+        ...     submitter.add_command(f'python train.py --model=model{i}')
+        >>>
+        >>> submitter.submit()
+        >>> # Result: All 4 commands run in parallel, each on a different GPU
+        >>> # Command 0: CUDA_VISIBLE_DEVICES=0
+        >>> # Command 1: CUDA_VISIBLE_DEVICES=1
+        >>> # Command 2: CUDA_VISIBLE_DEVICES=2
+        >>> # Command 3: CUDA_VISIBLE_DEVICES=3
     
     Batch Size Considerations:
     - **batch_size=1**: Each command gets its own SLURM job (maximum parallelism)
@@ -812,6 +840,8 @@ class ASlurmSubmitter:
         config_name (str): Name of the AutoSlurm configuration to use
         batch_size (int): Number of commands to group into each SLURM job
         randomize (bool): Whether to randomize command order before batching
+        gpus_per_task (int | None): Number of GPUs to assign per command (None = no GPU assignment)
+        num_gpus (int | None): Total number of GPUs available for distribution
         logger (logging.Logger): Logger instance for operation tracking
         commands (list[str]): Internal queue of commands awaiting submission
         options (dict): Internal options dictionary for CLI interface
@@ -823,7 +853,7 @@ class ASlurmSubmitter:
         - AutoSlurmConfig: Configuration management system
         - Batched: Helper class for command batching with randomization
     """
-    def __init__(self, 
+    def __init__(self,
                  config_name: str,
                  batch_size: int = 1,
                  randomize: bool = False,
@@ -832,6 +862,8 @@ class ASlurmSubmitter:
                  overwrite_fillers: dict[str, str] = {},
                  archive_path: str = os.getcwd(),
                  parallel: bool = False,
+                 gpus_per_task: int | None = None,
+                 num_gpus: int | None = None,
                  ):
         """
         Initialize an ASlurmSubmitter instance with the specified configuration and options.
@@ -871,7 +903,24 @@ class ASlurmSubmitter:
                                          - Scripts are organized in timestamped subdirectories
                                          - Should be accessible to the SLURM cluster
                                          - Consider disk space for large numbers of jobs
-        
+
+            parallel (bool, optional): Whether to run commands in parallel within each batch.
+                                      Defaults to False (sequential execution).
+                                      When True, commands run concurrently within the same job.
+
+            gpus_per_task (int | None, optional): Number of GPUs to assign to each command in a batch.
+                                                 Defaults to None (no GPU assignment).
+                                                 When set, each command gets its own GPU via CUDA_VISIBLE_DEVICES.
+                                                 Example: With gpus_per_task=1 and 4 commands, each command
+                                                 gets assigned GPU 0, 1, 2, or 3 respectively.
+                                                 **Note**: Only works when commands are passed individually,
+                                                 which happens automatically when this parameter is set.
+
+            num_gpus (int | None, optional): Total number of GPUs available for distribution.
+                                            Defaults to None (inferred from config or unlimited).
+                                            Used for validation and ensuring commands don't exceed
+                                            available GPU resources.
+
         Raises:
             FileNotFoundError: If the specified config_name does not exist in any config directory
             PermissionError: If archive_path is not writable
@@ -880,7 +929,7 @@ class ASlurmSubmitter:
         Example:
             >>> # Basic usage with default settings
             >>> submitter = ASlurmSubmitter('my_cluster_config')
-            
+
             >>> # Advanced usage with custom settings
             >>> import logging
             >>> logger = logging.getLogger(__name__)
@@ -892,6 +941,17 @@ class ASlurmSubmitter:
             ...     dry_run=False,
             ...     archive_path='/scratch/user/slurm_jobs'
             ... )
+
+            >>> # GPU assignment example - assign 1 GPU per command
+            >>> submitter = ASlurmSubmitter(
+            ...     config_name='gpu_4x_config',
+            ...     batch_size=4,
+            ...     gpus_per_task=1,
+            ...     parallel=True
+            ... )
+            >>> for i in range(4):
+            ...     submitter.add_command(f'python train.py --model=model{i}')
+            >>> submitter.submit()  # Each command gets GPU 0, 1, 2, 3 respectively
         
         Note:
             The constructor performs initial validation of the config_name but does not
@@ -906,19 +966,21 @@ class ASlurmSubmitter:
         self.logger = logger
         self.overwrite_fillers = overwrite_fillers
         self.parallel = parallel
-        
+        self.gpus_per_task = gpus_per_task
+        self.num_gpus = num_gpus
+
         ## --- computed properties ---
-        
-        # This list will store all of the individual commands that are added to the submitter over the 
+
+        # This list will store all of the individual commands that are added to the submitter over the
         # course of its lifetime, until the `submit` method is called.
         self.commands: list[str] = []
-        
+
         self.options = {
             'config_name':          config_name,
             'overwrite_fillers':    overwrite_fillers,
             'same':                 False,
-            'gpus_per_task':        None, 
-            'num_gpus':             None,
+            'gpus_per_task':        gpus_per_task,
+            'num_gpus':             num_gpus,
             'max_tasks':            None,
             'archive_path':         archive_path,
             'dry_run':              dry_run,
@@ -971,7 +1033,57 @@ class ASlurmSubmitter:
             count_jobs(): Get estimated number of SLURM jobs that will be created
         """
         self.commands.append(command)
-    
+
+    def _get_num_gpus(self) -> int:
+        """
+        Determine the number of GPUs available from configuration or parameters.
+
+        This method attempts to determine the GPU count through multiple strategies:
+        1. Use explicitly provided num_gpus parameter (highest priority)
+        2. Load from config's NO_gpus field
+        3. Parse from config's gres field (e.g., "gpu:4" or "gpu:full:4")
+        4. Default to 1 if unable to determine
+
+        Returns:
+            int: Number of GPUs available for task distribution
+
+        Example:
+            >>> submitter = ASlurmSubmitter('haicore_4gpu', gpus_per_task=1)
+            >>> submitter._get_num_gpus()
+            4
+        """
+        # Priority 1: Explicit num_gpus parameter
+        if self.num_gpus is not None:
+            return self.num_gpus
+
+        # Priority 2 & 3: Load from config
+        try:
+            config = self.cli.load_config(config_name=self.config_name)
+
+            # Try NO_gpus field first
+            if hasattr(config, 'NO_gpus') and config.NO_gpus is not None:
+                return int(config.NO_gpus)
+
+            # Try parsing from gres field
+            if hasattr(config, 'default_fillers') and 'gres' in config.default_fillers:
+                gres = config.default_fillers['gres']
+                # Parse formats like "gpu:4", "gpu:full:4", etc.
+                import re
+                match = re.search(r'gpu:(?:\w+:)?(\d+)', gres)
+                if match:
+                    return int(match.group(1))
+
+        except Exception:
+            # If config loading fails, fall through to default
+            pass
+
+        # Default fallback
+        self.logger.warning(
+            f"Could not determine GPU count from config '{self.config_name}'. "
+            f"Defaulting to 1 GPU. Consider setting num_gpus parameter explicitly."
+        )
+        return 1
+
     def submit(self):
         """
         Submit all queued commands to SLURM as one or more batch jobs.
@@ -1108,19 +1220,71 @@ class ASlurmSubmitter:
             submit(): Main method for submitting all queued commands
             ASlurm.cmd_command: Underlying CLI command used for script generation
         """
-        # --- 1. join the commands ---
-        # First of all we need to join the individual commands into a single command string since the 
-        # submission as a batch means that all the elements of the batch need to end up as a single SLURM 
-        # job in the end.
-        if self.parallel:
-            command_string: str = ' &\n '.join(commands)
+        # --- 1. Determine submission method based on GPU assignment ---
+        # If gpus_per_task is set, we need to pass commands individually so each can get its own
+        # GPU assignment via CUDA_VISIBLE_DEVICES. Otherwise, we join commands into a single string
+        # for backward compatibility.
+
+        if self.gpus_per_task is not None:
+            # --- GPU assignment mode: distribute commands across GPUs ---
+            # When GPU assignment is enabled, we need to intelligently distribute commands
+            # across available GPUs, ensuring each GPU processes its assigned commands
+            # sequentially while all GPUs work in parallel.
+
+            # Get the number of available GPUs
+            num_gpus = self._get_num_gpus()
+
+            # Group commands by GPU assignment (round-robin distribution)
+            # Example: 8 commands, 4 GPUs
+            #   GPU 0: [cmd0, cmd4]
+            #   GPU 1: [cmd1, cmd5]
+            #   GPU 2: [cmd2, cmd6]
+            #   GPU 3: [cmd3, cmd7]
+            gpu_command_groups = [[] for _ in range(num_gpus)]
+            for i, command in enumerate(commands):
+                gpu_idx = i % num_gpus
+                gpu_command_groups[gpu_idx].append(command)
+
+            # Create compound commands for each GPU
+            # Commands within each GPU group are joined with ';' for sequential execution
+            # The template will then assign different CUDA_VISIBLE_DEVICES to each group
+            compound_commands = []
+            for gpu_cmds in gpu_command_groups:
+                if gpu_cmds:  # Only include non-empty GPU groups
+                    # Join commands with ';' for sequential execution on this GPU
+                    compound_commands.append(' ; '.join(gpu_cmds))
+
+            # Build args list for CLI: ['compound_cmd1', 'cmd', 'compound_cmd2', ...]
+            args = []
+            for i, compound_cmd in enumerate(compound_commands):
+                if i > 0:
+                    args.append('cmd')
+                args.append(compound_cmd)
+
+            # Temporarily set 'same' to True to ensure all commands stay in one job
+            # This prevents the CLI from splitting commands across multiple jobs
+            original_same = self.options['same']
+            self.options['same'] = True
+            self.cli.options['same'] = True
+
+            try:
+                # Submit with compound commands
+                self.ctx.invoke(self.cli.cmd_command, args=args)
+            finally:
+                # Restore original 'same' value
+                self.options['same'] = original_same
+                self.cli.options['same'] = original_same
         else:
-            command_string: str = ' ; '.join(commands)
-        
-        # --- 2. submit using the CLI ---
-        # This command will use the existing CLI interface to submit the given command string as an 
-        # individual SLURM job.
-        self.ctx.invoke(self.cli.cmd_command, args=[command_string])
+            # --- Default mode: join commands into single string ---
+            # For backward compatibility, when GPU assignment is not needed, join all commands
+            # into a single string that gets executed as one task.
+            if self.parallel:
+                command_string: str = ' &\n '.join(commands)
+            else:
+                command_string: str = ' ; '.join(commands)
+
+            # Submit using the CLI with joined command string
+            self.ctx.invoke(self.cli.cmd_command, args=[command_string])
 
     def count_jobs(self) -> int:
         """
