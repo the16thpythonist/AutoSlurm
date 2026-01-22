@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import os
+import re
 import pathlib
 import platform
 import subprocess
@@ -9,6 +10,7 @@ import logging
 import random
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from io import StringIO
+from itertools import product
 from typing import Iterator, Iterable, TypeVar, List
 
 import rich_click
@@ -31,10 +33,232 @@ TEMPLATE_ENV = j2.Environment(
 )
 
 # This can be used as a default logger wherever a logger can be supplied as a parameter/argument
-# This logger will simply ignore all the logging calls but crucially it can be handled as any 
+# This logger will simply ignore all the logging calls but crucially it can be handled as any
 # oher logger instance - reducing the need for if logger is not None: checks everywhere
 NULL_LOGGER = logging.getLogger("auto_slurm")
 NULL_LOGGER.addHandler(logging.NullHandler())
+
+
+# ============================================================================
+# Command Expansion Utilities
+# ============================================================================
+#
+# These utilities enable parameter sweep syntax for batch job submission.
+# Users can specify multiple parameter values in a single command, and these
+# functions will expand them into multiple individual commands.
+#
+# Two syntaxes are supported:
+#   1. Paired lists <[...]>  - Values across parameters are zipped together
+#   2. Grid search  <{...}>  - Creates cartesian product of all values
+#
+# Example (paired):
+#   "python train.py --lr=<[0.1, 0.01]> --bs=<[16, 32]>"
+#   Expands to 2 commands: lr=0.1,bs=16 and lr=0.01,bs=32
+#
+# Example (grid):
+#   "python train.py --lr=<{0.1, 0.01}> --bs=<{16, 32}>"
+#   Expands to 4 commands: all combinations of lr and bs values
+# ============================================================================
+
+
+def split_top_level_commas(s: str) -> List[str]:
+    """
+    Split a string by commas, respecting nested bracket structures.
+
+    This function splits a comma-separated string into parts, but only splits
+    on commas that are at the "top level" - i.e., not enclosed within any
+    brackets, braces, or parentheses. This is essential for parsing sweep
+    syntax values that may themselves contain commas (e.g., nested lists).
+
+    Algorithm:
+        - Track bracket nesting depth as we scan the string
+        - Only split on commas when depth is 0 (top level)
+        - Raise an error if brackets are unbalanced
+
+    Args:
+        s (str): The string to split. May contain nested brackets, braces,
+                 or parentheses that should be preserved.
+
+    Returns:
+        List[str]: List of comma-separated parts with leading/trailing
+                   whitespace stripped from each part.
+
+    Raises:
+        ValueError: If brackets are unbalanced (more opens than closes
+                   or vice versa).
+
+    Examples:
+        >>> split_top_level_commas("a, b, c")
+        ['a', 'b', 'c']
+
+        >>> split_top_level_commas("a, [b, c], d")
+        ['a', '[b, c]', 'd']
+
+        >>> split_top_level_commas("func(x, y), other(z)")
+        ['func(x, y)', 'other(z)']
+
+        >>> split_top_level_commas("[[1, 2], [3, 4]], 5")
+        ['[[1, 2], [3, 4]]', '5']
+
+    Note:
+        All bracket types ([], {}, ()) are treated equivalently for
+        nesting purposes. The function does not validate that bracket
+        types match (e.g., "[}" would not raise an error for mismatched
+        types, only for unbalanced counts).
+    """
+    parts = []
+    current = []
+    depth = 0
+
+    for ch in s:
+        # Track nesting depth for all bracket types
+        if ch in "[{(":
+            depth += 1
+        elif ch in "]})":
+            depth -= 1
+            # Check for unbalanced closing bracket
+            if depth < 0:
+                raise ValueError("Unbalanced brackets")
+
+        # Split on comma only at top level (depth == 0)
+        elif ch == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+
+        current.append(ch)
+
+    # Check for unbalanced opening brackets
+    if depth != 0:
+        raise ValueError("Unbalanced brackets")
+
+    # Don't forget the last part (after the final comma, or the whole string)
+    parts.append("".join(current).strip())
+    return parts
+
+
+def expand_commands(commands: List[str]) -> List[str]:
+    """
+    Expand commands containing parameter sweep syntax into multiple commands.
+
+    This function processes a list of command strings and expands any that
+    contain sweep syntax markers. Two types of sweep syntax are supported:
+
+    1. **Paired Lists** ``<[value1, value2, ...]>``
+       Multiple paired list markers in the same command are "zipped" together.
+       All paired lists must have the same number of values.
+
+       Example:
+           Input:  ["python train.py --lr=<[0.1, 0.01]> --bs=<[16, 32]>"]
+           Output: ["python train.py --lr=0.1 --bs=16",
+                    "python train.py --lr=0.01 --bs=32"]
+
+    2. **Grid Search** ``<{value1, value2, ...}>``
+       Multiple grid markers create a cartesian product of all values.
+
+       Example:
+           Input:  ["python train.py --lr=<{0.1, 0.01}> --bs=<{16, 32}>"]
+           Output: ["python train.py --lr=0.1 --bs=16",
+                    "python train.py --lr=0.1 --bs=32",
+                    "python train.py --lr=0.01 --bs=16",
+                    "python train.py --lr=0.01 --bs=32"]
+
+    Processing Order:
+        Commands are processed in order, and expanded commands maintain
+        relative ordering. A command without sweep syntax passes through
+        unchanged.
+
+    Args:
+        commands (List[str]): List of command strings, possibly containing
+                              sweep syntax markers.
+
+    Returns:
+        List[str]: Expanded list of commands with all sweep syntax resolved.
+                   The length will be >= the input length (equal if no
+                   expansion occurs).
+
+    Raises:
+        ValueError: If a single command mixes both <[]> and <{}> syntax.
+        ValueError: If paired lists (<[]>) have different lengths.
+
+    Examples:
+        >>> # Paired expansion (zip behavior)
+        >>> expand_commands(["echo <[a, b, c]>"])
+        ['echo a', 'echo b', 'echo c']
+
+        >>> # Grid expansion (cartesian product)
+        >>> expand_commands(["echo <{1, 2}> <{x, y}>"])
+        ['echo 1 x', 'echo 1 y', 'echo 2 x', 'echo 2 y']
+
+        >>> # No expansion syntax - command passes through unchanged
+        >>> expand_commands(["python script.py --arg=value"])
+        ['python script.py --arg=value']
+
+        >>> # Multiple commands, mixed expansion
+        >>> expand_commands(["setup.py", "train.py --lr=<{0.1, 0.01}>"])
+        ['setup.py', 'train.py --lr=0.1', 'train.py --lr=0.01']
+
+    Note:
+        - Values within sweep markers can contain nested brackets
+        - Whitespace around values is stripped
+        - Empty input list returns empty output list
+    """
+    expanded_commands = []
+
+    for command in commands:
+        # Find all instances of paired list <[...]> and grid search <{...}> syntax
+        # Using non-greedy matching (.*?) to handle multiple markers per command
+        bracket_matches = re.findall(r"<\[(.*?)\]>", command)
+        brace_matches = re.findall(r"<\{(.*?)\}>", command)
+
+        # Validate: cannot mix both syntaxes in the same command
+        if bracket_matches and brace_matches:
+            raise ValueError("Cannot mix <[]> and <{}> syntax in the same command.")
+
+        if bracket_matches:
+            # === Paired List Expansion (Zip Behavior) ===
+            # Parse each <[...]> marker into a list of values
+            options = [
+                [subitem.strip() for subitem in split_top_level_commas(item)]
+                for item in bracket_matches
+            ]
+
+            # Validate: all paired lists must have the same length
+            if any(len(opt) != len(options[0]) for opt in options):
+                raise ValueError("Paired lists must have the same length.")
+
+            # Zip values together and create one command per tuple
+            for values in zip(*options):
+                temp_command = command
+                # Replace each marker with its corresponding value
+                # Using replace(..., 1) to handle duplicate patterns correctly
+                for match, value in zip(bracket_matches, values):
+                    temp_command = temp_command.replace(f"<[{match}]>", value, 1)
+                expanded_commands.append(temp_command)
+
+        elif brace_matches:
+            # === Grid Search Expansion (Cartesian Product) ===
+            # Parse each <{...}> marker into a list of values
+            options = [
+                [subitem.strip() for subitem in split_top_level_commas(item)]
+                for item in brace_matches
+            ]
+
+            # Generate all combinations using cartesian product
+            for values in product(*options):
+                temp_command = command
+                # Replace each marker with its corresponding value
+                for match, value in zip(brace_matches, values):
+                    # Note: need to escape braces in f-string: {{match}}
+                    temp_command = temp_command.replace(f"<{{{match}}}>", value, 1)
+                expanded_commands.append(temp_command)
+
+        else:
+            # === No Sweep Syntax ===
+            # Command passes through unchanged
+            expanded_commands.append(command)
+
+    return expanded_commands
 
 
 class Batched:

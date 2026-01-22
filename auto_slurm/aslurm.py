@@ -16,6 +16,7 @@ from itertools import product
 from auto_slurm.config import Config
 from auto_slurm.config import GeneralConfig
 from auto_slurm.config import AutoSlurmConfig
+from auto_slurm.helpers import split_top_level_commas, expand_commands
 
 # This is the absolute string path to the auto-slurm PACKAGE folder which has been
 # installed in the local python environment and can be used as the base path for
@@ -198,75 +199,6 @@ def launch_slurm_job(
         print(e.stdout)
         print(e.stderr)
         return None
-
-
-def split_top_level_commas(s: str):
-    parts = []
-    current = []
-    depth = 0
-
-    for ch in s:
-        if ch in "[{(":
-            depth += 1
-        elif ch in "]})":
-            depth -= 1
-            if depth < 0:
-                raise ValueError("Unbalanced brackets")
-        elif ch == "," and depth == 0:
-            parts.append("".join(current).strip())
-            current = []
-            continue
-        current.append(ch)
-
-    if depth != 0:
-        raise ValueError("Unbalanced brackets")
-
-    parts.append("".join(current).strip())
-    return parts
-
-
-def expand_commands(commands: List[str]) -> List[str]:
-    expanded_commands = []
-
-    for command in commands:
-        # Find all instances of <[]> and <{}> syntax:
-        bracket_matches = re.findall(r"<\[(.*?)\]>", command)
-        brace_matches = re.findall(r"<\{(.*?)\}>", command)
-
-        if bracket_matches and brace_matches:
-            raise ValueError("Cannot mix <[]> and <{}> syntax in the same command.")
-
-        if bracket_matches:
-            options = [
-                [subitem.strip() for subitem in split_top_level_commas(item)]
-                for item in bracket_matches
-            ]
-
-            if any(len(opt) != len(options[0]) for opt in options):
-                raise ValueError("Paired lists must have the same length.")
-
-            for values in zip(*options):
-                temp_command = command
-                for match, value in zip(bracket_matches, values):
-                    temp_command = temp_command.replace(f"<[{match}]>", value, 1)
-                expanded_commands.append(temp_command)
-
-        elif brace_matches:
-            options = [
-                [subitem.strip() for subitem in split_top_level_commas(item)]
-                for item in brace_matches
-            ]
-
-            for values in product(*options):
-                temp_command = command
-                for match, value in zip(brace_matches, values):
-                    temp_command = temp_command.replace(f"<{{{match}}}>", value, 1)
-                expanded_commands.append(temp_command)
-
-        else:
-            expanded_commands.append(command)
-
-    return expanded_commands
 
 
 def main():

@@ -33,6 +33,7 @@ from auto_slurm.helpers import Batched
 from auto_slurm.helpers import open_file_in_editor
 from auto_slurm.helpers import get_version
 from auto_slurm.helpers import create_slurm_jobs
+from auto_slurm.helpers import expand_commands
 from auto_slurm.config import AutoSlurmConfig
 from auto_slurm.config import GeneralConfig, Config
 from jinja2 import FileSystemLoader, ChoiceLoader
@@ -290,7 +291,8 @@ class ASlurm(click.RichGroup):
         ## --- registering commands ---
         # The individual commands are registered
         self.add_command(self.cmd_command)
-        
+        self.add_command(self.interactive_command)
+
         self.config_group.add_command(self.list_configs_command)
         self.config_group.add_command(self.edit_configs_command)
         self.config_group.add_command(self.where_configs_command)
@@ -638,9 +640,13 @@ class ASlurm(click.RichGroup):
         # The "cmd" command may actually be composed of multiple "cmd" commands at the same time 
         # and in this first step we want to find all the ones for the given invocation.
         
-        # This data structure will store all the individual commands that are found in the 
+        # This data structure will store all the individual commands that are found in the
         # given command line arguments as individual strings.
         commands: list[str] = self.extract_commands_from_args(args_raw)
+
+        # Expand any sweep syntax (<[...]> for paired lists, <{...}> for grid search)
+        commands = expand_commands(commands)
+
         click.echo(f'preparing to submit {len(commands)} commands...')
         
         # 2) config loading
@@ -757,7 +763,102 @@ class ASlurm(click.RichGroup):
         
         click.echo()
         click.echo('You may check on the status of your jobs using the `squeue` command.')
-        
+
+    # == "interactive" command ==
+    # Command to start an interactive job for shell access.
+
+    @click.command('interactive', short_help='Start an interactive job for shell access.')
+    @click.pass_obj
+    def interactive_command(self):
+        """
+        Start an interactive SLURM job that you can attach a bash shell to.
+
+        This command schedules a SLURM job running an infinite sleep loop,
+        allowing you to attach an interactive shell session using srun.
+        This is useful for debugging, testing, or running commands that
+        require interactive input.
+
+        Example usage:
+            aslurmx -cn haicore_1gpu interactive
+
+        After the job starts, attach a shell with:
+            srun --jobid <JOB_ID> --pty bash
+
+        Remember to cancel the job when finished:
+            scancel <JOB_ID>
+        """
+        # 1) Config loading (with auto-detection)
+        if self.options['config_name'] is None:
+            self.options['config_name'] = self.detect_config_from_hostname()
+
+        config: Config = self.load_config(config_name=self.options['config_name'])
+        click.echo(f'✅ loaded config: {self.options["config_name"]}')
+
+        # 2) Create scripts folder
+        scripts_path: str = self.create_scipts_folder(self.options['archive_path'])
+
+        # 3) Assemble fillers
+        fillers: dict[str, any] = self.general_config.global_fillers.copy()
+        venv_path = self.discover_venv(os.getcwd())
+        if venv_path:
+            fillers['venv'] = venv_path
+        fillers.update(config.default_fillers)
+        fillers.update(self.options['overwrite_fillers'])
+
+        # 4) The interactive command - an infinite sleep loop
+        commands = ["bash -c '{ while true; do sleep 10000; done; }'"]
+
+        # 5) Create SLURM scripts
+        main_content, resume_content = create_slurm_jobs(
+            commands=commands,
+            fillers=fillers,
+            options=self.options,
+            main_template=TEMPLATE_ENV.get_template('main.sh.j2'),
+            resume_template=TEMPLATE_ENV.get_template('resume.sh.j2'),
+        )
+
+        main_path = os.path.join(scripts_path, 'main_interactive.sh')
+        with open(main_path, 'w') as f:
+            f.write(main_content)
+
+        resume_path = os.path.join(scripts_path, 'resume_interactive.sh')
+        with open(resume_path, 'w') as f:
+            f.write(resume_content)
+
+        # 6) Submit job
+        if self.options['dry_run']:
+            click.echo(f'Dry run - script created at: {main_path}')
+            return
+
+        try:
+            sbatch_command = ['sbatch']
+            if self.options.get('exclude'):
+                sbatch_command.append(f'--exclude={self.options["exclude"]}')
+            sbatch_command.append(main_path)
+
+            result = subprocess.run(sbatch_command, capture_output=True, text=True, check=True)
+            output = result.stdout
+
+            if "Submitted" not in output:
+                raise ValueError(f"Unexpected sbatch output: {output}")
+
+            job_id = output.strip().split()[-1]
+
+            # Print helpful instructions
+            click.echo()
+            click.secho(f'🚀 Interactive job submitted with SLURM ID {job_id}', fg='green', bold=True)
+            click.echo()
+            click.echo('Attach a bash shell to the job using:')
+            click.secho(f'    srun --jobid {job_id} --pty bash', fg='cyan', bold=True)
+            click.echo()
+            click.echo('When finished, cancel the job with:')
+            click.secho(f'    scancel {job_id}', fg='yellow')
+
+        except subprocess.CalledProcessError as e:
+            click.secho('⚠️ Failed to submit interactive job!', fg='red', err=True)
+            click.echo(e.stderr if e.stderr else e.stdout)
+            sys.exit(1)
+
     # == Helper methods ==
     # The following methods do not implement any commands but rather provide utility functions
     # that are used by the commands above.
@@ -1462,14 +1563,17 @@ class ASlurmSubmitter:
             count_jobs(): Get estimated number of jobs before submission
             submit_batch(): Internal method for submitting individual batches
         """
-        
-        num_jobs = self.count_jobs()
-        
+
+        # Expand any sweep syntax (<[...]> for paired lists, <{...}> for grid search)
+        expanded_commands = expand_commands(self.commands)
+
+        num_jobs = math.ceil(len(expanded_commands) / self.batch_size)
+
         with tqdm(total=num_jobs, desc='Submitting jobs', unit='job') as pbar:
-        
+
             batched_commands = Batched(
-                self.commands, 
-                batch_size=self.batch_size, 
+                expanded_commands,
+                batch_size=self.batch_size,
                 randomize=self.randomize
             )
             for commands in batched_commands:
@@ -1648,7 +1752,9 @@ class ASlurmSubmitter:
             submit(): Submit all queued commands and create the estimated number of jobs
             add_command(): Add commands to the queue (affects the count)
         """
-        return math.ceil(len(self.commands) / self.batch_size)
+        # Expand commands to get accurate count (sweep syntax may multiply commands)
+        expanded_commands = expand_commands(self.commands)
+        return math.ceil(len(expanded_commands) / self.batch_size)
 
 
 

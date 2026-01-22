@@ -4,6 +4,7 @@ import pytest
 from .utils import ASSETS_PATH, ARTIFACTS_PATH
 from auto_slurm.helpers import TEMPLATE_ENV
 from auto_slurm.helpers import create_slurm_jobs, Batched
+from auto_slurm.helpers import split_top_level_commas, expand_commands
 
 
 def test_saving_artifacts():
@@ -235,12 +236,249 @@ class TestBatched:
         def number_generator():
             for i in range(5):
                 yield i
-        
+
         batched = Batched(number_generator(), batch_size=2)
-        
+
         batches = list(batched)
         expected = [[0, 1], [2, 3], [4]]
-        
+
         assert batches == expected
+
+
+class TestSplitTopLevelCommas:
+    """Test class for the split_top_level_commas function."""
+
+    def test_simple_split(self):
+        """Test splitting a simple comma-separated string."""
+        result = split_top_level_commas("a, b, c")
+        assert result == ["a", "b", "c"]
+
+    def test_no_commas(self):
+        """Test string with no commas returns single element."""
+        result = split_top_level_commas("single_value")
+        assert result == ["single_value"]
+
+    def test_empty_string(self):
+        """Test empty string returns single empty element."""
+        result = split_top_level_commas("")
+        assert result == [""]
+
+    def test_nested_brackets(self):
+        """Test that commas inside brackets are not split."""
+        result = split_top_level_commas("a, [b, c], d")
+        assert result == ["a", "[b, c]", "d"]
+
+    def test_nested_braces(self):
+        """Test that commas inside braces are not split."""
+        result = split_top_level_commas("x, {y, z}, w")
+        assert result == ["x", "{y, z}", "w"]
+
+    def test_nested_parentheses(self):
+        """Test that commas inside parentheses are not split."""
+        result = split_top_level_commas("func(a, b), other(c, d)")
+        assert result == ["func(a, b)", "other(c, d)"]
+
+    def test_deeply_nested(self):
+        """Test deeply nested structures."""
+        result = split_top_level_commas("a, [[b, c], d], e")
+        assert result == ["a", "[[b, c], d]", "e"]
+
+    def test_mixed_brackets(self):
+        """Test mixed bracket types."""
+        result = split_top_level_commas("a, [b, {c, d}], (e, f)")
+        assert result == ["a", "[b, {c, d}]", "(e, f)"]
+
+    def test_whitespace_handling(self):
+        """Test that whitespace is properly stripped."""
+        result = split_top_level_commas("  a  ,  b  ,  c  ")
+        assert result == ["a", "b", "c"]
+
+    def test_unbalanced_opening_bracket_raises(self):
+        """Test that unbalanced opening bracket raises ValueError."""
+        with pytest.raises(ValueError, match="Unbalanced brackets"):
+            split_top_level_commas("a, [b, c")
+
+    def test_unbalanced_closing_bracket_raises(self):
+        """Test that unbalanced closing bracket raises ValueError."""
+        with pytest.raises(ValueError, match="Unbalanced brackets"):
+            split_top_level_commas("a, b], c")
+
+    def test_complex_values(self):
+        """Test splitting complex command-line style values."""
+        result = split_top_level_commas("--lr=0.1, --config=[a,b,c], --name=test")
+        assert result == ["--lr=0.1", "--config=[a,b,c]", "--name=test"]
+
+
+class TestExpandCommands:
+    """Test class for the expand_commands function."""
+
+    # --- Paired List Expansion Tests (<[...]>) ---
+
+    def test_paired_expansion_simple(self):
+        """Test simple paired list expansion with two parameters."""
+        commands = ["python train.py --lr=<[0.1, 0.01]> --bs=<[16, 32]>"]
+        result = expand_commands(commands)
+        expected = [
+            "python train.py --lr=0.1 --bs=16",
+            "python train.py --lr=0.01 --bs=32",
+        ]
+        assert result == expected
+
+    def test_paired_expansion_single_param(self):
+        """Test paired list expansion with single parameter."""
+        commands = ["python train.py --lr=<[0.1, 0.01, 0.001]>"]
+        result = expand_commands(commands)
+        expected = [
+            "python train.py --lr=0.1",
+            "python train.py --lr=0.01",
+            "python train.py --lr=0.001",
+        ]
+        assert result == expected
+
+    def test_paired_expansion_three_params(self):
+        """Test paired list expansion with three parameters."""
+        commands = ["python train.py --a=<[1, 2]> --b=<[x, y]> --c=<[!, @]>"]
+        result = expand_commands(commands)
+        expected = [
+            "python train.py --a=1 --b=x --c=!",
+            "python train.py --a=2 --b=y --c=@",
+        ]
+        assert result == expected
+
+    def test_paired_expansion_length_mismatch_raises(self):
+        """Test that mismatched paired list lengths raise ValueError."""
+        commands = ["python train.py --lr=<[0.1, 0.01, 0.001]> --bs=<[16, 32]>"]
+        with pytest.raises(ValueError, match="Paired lists must have the same length"):
+            expand_commands(commands)
+
+    # --- Grid Search Expansion Tests (<{...}>) ---
+
+    def test_grid_expansion_simple(self):
+        """Test simple grid search expansion with two parameters."""
+        commands = ["python train.py --lr=<{0.1, 0.01}> --bs=<{16, 32}>"]
+        result = expand_commands(commands)
+        expected = [
+            "python train.py --lr=0.1 --bs=16",
+            "python train.py --lr=0.1 --bs=32",
+            "python train.py --lr=0.01 --bs=16",
+            "python train.py --lr=0.01 --bs=32",
+        ]
+        assert result == expected
+
+    def test_grid_expansion_single_param(self):
+        """Test grid search expansion with single parameter."""
+        commands = ["python train.py --lr=<{0.1, 0.01, 0.001}>"]
+        result = expand_commands(commands)
+        expected = [
+            "python train.py --lr=0.1",
+            "python train.py --lr=0.01",
+            "python train.py --lr=0.001",
+        ]
+        assert result == expected
+
+    def test_grid_expansion_three_params(self):
+        """Test grid search expansion creates full cartesian product."""
+        commands = ["python train.py --a=<{1, 2}> --b=<{x, y}> --c=<{!}>"]
+        result = expand_commands(commands)
+        # 2 * 2 * 1 = 4 combinations
+        assert len(result) == 4
+        assert "python train.py --a=1 --b=x --c=!" in result
+        assert "python train.py --a=1 --b=y --c=!" in result
+        assert "python train.py --a=2 --b=x --c=!" in result
+        assert "python train.py --a=2 --b=y --c=!" in result
+
+    def test_grid_expansion_asymmetric(self):
+        """Test grid expansion with different sized parameter lists."""
+        commands = ["python train.py --lr=<{0.1, 0.01, 0.001}> --bs=<{16, 32}>"]
+        result = expand_commands(commands)
+        # 3 * 2 = 6 combinations
+        assert len(result) == 6
+
+    # --- Mixed and Edge Cases ---
+
+    def test_mixing_paired_and_grid_raises(self):
+        """Test that mixing <[]> and <{}> in same command raises ValueError."""
+        commands = ["python train.py --lr=<[0.1, 0.01]> --bs=<{16, 32}>"]
+        with pytest.raises(ValueError, match="Cannot mix"):
+            expand_commands(commands)
+
+    def test_no_expansion_syntax(self):
+        """Test that commands without expansion syntax are unchanged."""
+        commands = ["python train.py --lr=0.1 --bs=16"]
+        result = expand_commands(commands)
+        assert result == commands
+
+    def test_empty_commands_list(self):
+        """Test that empty command list returns empty list."""
+        result = expand_commands([])
+        assert result == []
+
+    def test_multiple_commands_mixed(self):
+        """Test expanding multiple commands with different syntaxes."""
+        commands = [
+            "python train.py --lr=<{0.1, 0.01}>",
+            "python eval.py --model=best",
+            "python test.py --seed=<[1, 2, 3]>",
+        ]
+        result = expand_commands(commands)
+        # First command: 2 expansions, Second: 1 (no expansion), Third: 3 expansions
+        assert len(result) == 6
+        assert "python train.py --lr=0.1" in result
+        assert "python train.py --lr=0.01" in result
+        assert "python eval.py --model=best" in result
+        assert "python test.py --seed=1" in result
+        assert "python test.py --seed=2" in result
+        assert "python test.py --seed=3" in result
+
+    def test_nested_brackets_in_values(self):
+        """Test expansion with nested brackets in values."""
+        commands = ["python train.py --config=<{[1,2], [3,4]}>"]
+        result = expand_commands(commands)
+        expected = [
+            "python train.py --config=[1,2]",
+            "python train.py --config=[3,4]",
+        ]
+        assert result == expected
+
+    def test_whitespace_in_values(self):
+        """Test that whitespace in values is properly handled."""
+        commands = ["python train.py --name=<{ hello , world }>"]
+        result = expand_commands(commands)
+        expected = [
+            "python train.py --name=hello",
+            "python train.py --name=world",
+        ]
+        assert result == expected
+
+    def test_special_characters_in_values(self):
+        """Test expansion with special characters in values."""
+        commands = ["python train.py --path=<{/path/to/a, /path/to/b}>"]
+        result = expand_commands(commands)
+        expected = [
+            "python train.py --path=/path/to/a",
+            "python train.py --path=/path/to/b",
+        ]
+        assert result == expected
+
+    def test_single_value_expansion(self):
+        """Test expansion with single value (no actual expansion)."""
+        commands = ["python train.py --lr=<{0.1}>"]
+        result = expand_commands(commands)
+        expected = ["python train.py --lr=0.1"]
+        assert result == expected
+
+    def test_expansion_preserves_command_order(self):
+        """Test that expansion preserves the order of commands."""
+        commands = [
+            "first_command",
+            "python train.py --lr=<{0.1, 0.01}>",
+            "last_command",
+        ]
+        result = expand_commands(commands)
+        assert result[0] == "first_command"
+        assert result[-1] == "last_command"
+        # Middle should be the expanded commands
+        assert result[1] == "python train.py --lr=0.1"
+        assert result[2] == "python train.py --lr=0.01"
 
 
