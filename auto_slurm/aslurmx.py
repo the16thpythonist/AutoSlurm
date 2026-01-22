@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import os
 import sys
+import re
 import pathlib
 import datetime
 import subprocess
@@ -61,9 +64,9 @@ class RichLogo:
 class RichHelp:
     """
     A rich display which will show the "help" section for the ASlurmX CLI tool when printed.
-    This help sections contains special formatting for the various example commands.
+    This help section contains special formatting for the various example commands.
     """
-    
+
     def __rich_console__(self, console, options):
         yield "AutoSlurm Command Line Interface X.\n"
         yield Text((
@@ -74,7 +77,7 @@ class RichHelp:
             "aslurmx -cn <config_name> cmd python script.py --arg1=100"
         ), lexer='bash', theme='monokai', line_numbers=False), (1, 5))
         yield Text((
-            "Everything after the 'cmd' keyworkd will be used as the actual command to be scheduled in SLURM.\n"
+            "Everything after the 'cmd' keyword will be used as the actual command to be scheduled in SLURM.\n"
         ))
         yield Text((
             "For instance, the following command will schedule the script 'train.py' to be executed on the "
@@ -88,10 +91,31 @@ class RichHelp:
             "also control how the available GPUs "
             "should be distributed across those tasks. The following command will schedule two jobs, allocating "
             "2 GPUs of a 4-GPU node to each task. The tasks will be executed in parallel, but still "
-            "be bundled in the same job:"  
+            "be bundled in the same job:"
         ))
         yield Padding(Syntax((
-            "aslurmx ---config=bwuni_4gpu_h100 --gpus-per-task=2 cmd python train.py cmd python train.py"
+            "aslurmx --config=bwuni_4gpu_h100 --gpus-per-task=2 cmd python train.py cmd python train.py"
+        ), lexer='bash', theme='monokai', line_numbers=False), (1, 5))
+
+        # Command Repetition Section
+        yield Text.from_markup("\n[bold]Command Repetition (cmdNx Syntax)[/bold]\n")
+        yield Text((
+            "To repeat a command multiple times, use the 'cmdNx' syntax where N is the repetition count. "
+            "Both 'cmdN' and 'cmdNx' formats are supported (e.g., cmd3 or cmd3x). "
+            "This is useful for running multiple instances of the same experiment:"
+        ))
+        yield Padding(Syntax((
+            "# Run the training script 5 times (e.g., with different random seeds)\n"
+            "aslurmx -cn config cmd5x python train.py --seed=$RANDOM\n\n"
+            "# Equivalent to writing 'cmd' five times:\n"
+            "# aslurmx -cn config cmd python train.py cmd python train.py cmd ..."
+        ), lexer='bash', theme='monokai', line_numbers=False), (1, 5))
+        yield Text((
+            "You can also mix regular 'cmd' with 'cmdNx' in the same invocation:"
+        ))
+        yield Padding(Syntax((
+            "# Run setup once, then training 3 times, then evaluation once\n"
+            "aslurmx -cn config cmd python setup.py cmd3x python train.py cmd python eval.py"
         ), lexer='bash', theme='monokai', line_numbers=False), (1, 5))
 
 class RichConfigList:
@@ -219,7 +243,37 @@ class KeyValueList(click.ParamType):
 
 
 class ASlurm(click.RichGroup):
-    
+    """
+    Custom Click Group for the ASlurmX CLI.
+
+    This class extends click.RichGroup to provide additional functionality for
+    the AutoSlurm command-line interface, including:
+
+    - Custom help formatting with logo display
+    - Configuration management and discovery
+    - Support for the 'cmdNx' command repetition syntax (e.g., cmd3x, cmd5)
+
+    Command Repetition Syntax (cmdNx):
+        ASlurmX supports a special syntax for repeating commands multiple times.
+        Instead of writing 'cmd' multiple times, users can use:
+
+        - cmd3x  : Repeat the following command 3 times
+        - cmd5   : Repeat the following command 5 times
+        - cmd10x : Repeat the following command 10 times
+
+        This is implemented by overriding Click's get_command() and resolve_command()
+        methods to recognize cmdNx patterns and route them to the 'cmd' handler while
+        preserving the repetition information in the arguments.
+    """
+
+    # Regex pattern to match cmdNx syntax (e.g., cmd3, cmd5x, cmd10x)
+    # This pattern requires at least one digit, distinguishing it from plain 'cmd'
+    # - ^cmd      : Must start with 'cmd'
+    # - (\d+)     : One or more digits (captured for repetition count)
+    # - x?        : Optional trailing 'x'
+    # - $         : End of string
+    CMDNX_PATTERN = re.compile(r'^cmd(\d+)x?$')
+
     def __init__(self, *args, **kwargs):
         
         super().__init__(*args, **kwargs)
@@ -299,7 +353,110 @@ class ASlurm(click.RichGroup):
         self.format_usage(ctx, formatter)
         self.format_options(ctx, formatter)
         self.format_epilog(ctx, formatter)
-    
+
+    # == Command Resolution Overrides ==
+    # These methods implement support for the cmdNx syntax (e.g., cmd3x, cmd5)
+    # by customizing Click's command resolution mechanism.
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        """
+        Resolve a command name to a Click Command object.
+
+        This method overrides Click's default get_command() to support the cmdNx
+        syntax for command repetition. When a user types 'cmd3x' or 'cmd5', this
+        method recognizes the pattern and returns the 'cmd' command, while storing
+        the original marker in the context for later processing.
+
+        The cmdNx Syntax:
+            - cmd3x  → Execute the following command 3 times
+            - cmd5   → Execute the following command 5 times
+            - cmd10x → Execute the following command 10 times
+
+        How it works:
+            1. First attempts standard command lookup via parent class
+            2. If no match, checks if cmd_name matches the cmdNx pattern
+            3. If it matches, stores the original marker in ctx._original_cmdnx
+            4. Returns the 'cmd' command so Click routes to cmd_command handler
+            5. resolve_command() later injects the marker back into the args
+
+        Args:
+            ctx: The Click context object
+            cmd_name: The command name to resolve (e.g., 'cmd', 'cmd3x', 'config')
+
+        Returns:
+            The resolved Click Command object, or None if not found
+
+        Example:
+            User types: aslurmx -cn config cmd3x python train.py
+            - get_command receives cmd_name='cmd3x'
+            - Stores ctx._original_cmdnx = 'cmd3x'
+            - Returns the 'cmd' command
+        """
+        # First, try standard command lookup (handles 'cmd', 'config', etc.)
+        rv = super().get_command(ctx, cmd_name)
+        if rv is not None:
+            return rv
+
+        # Check if cmd_name matches the cmdNx pattern (e.g., cmd3x, cmd5)
+        if self.CMDNX_PATTERN.match(cmd_name):
+            # Store the original cmdNx marker in the context so that
+            # resolve_command() can inject it back into the arguments.
+            # This allows extract_commands_from_args() to see the repetition count.
+            ctx._original_cmdnx = cmd_name
+
+            # Return the 'cmd' command - Click will route to cmd_command handler
+            return super().get_command(ctx, 'cmd')
+
+        # No match found
+        return None
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        """
+        Resolve a command name from arguments and return the command with remaining args.
+
+        This method overrides Click's default resolve_command() to complete the cmdNx
+        syntax support. After get_command() has routed a cmdNx pattern to the 'cmd'
+        command, this method injects the original cmdNx marker back into the arguments
+        so that extract_commands_from_args() can process the repetition count.
+
+        How it works:
+            1. Calls parent resolve_command() to get standard resolution
+            2. Checks if ctx._original_cmdnx was set by get_command()
+            3. If set, prepends the original cmdNx marker to remaining_args
+            4. Cleans up the context attribute
+
+        Args:
+            ctx: The Click context object
+            args: The argument list to resolve from
+
+        Returns:
+            Tuple of (command_name, command_object, remaining_args)
+
+        Example:
+            After get_command() stored ctx._original_cmdnx = 'cmd3x':
+            - Input args: ['python', 'train.py'] (cmdNx was consumed as command name)
+            - Output remaining_args: ['cmd3x', 'python', 'train.py'] (marker injected)
+
+            This results in cmd_command receiving args=('cmd3x', 'python', 'train.py')
+            which becomes args_raw=['cmd', 'cmd3x', 'python', 'train.py'] and
+            extract_commands_from_args() will repeat 'python train.py' 3 times.
+        """
+        # Get standard command resolution from parent class
+        cmd_name, cmd, remaining_args = super().resolve_command(ctx, args)
+
+        # If get_command() stored an original cmdNx marker, inject it back into
+        # the arguments. This is necessary because Click consumed the cmdNx token
+        # as the command name, but we need extract_commands_from_args() to see it.
+        if hasattr(ctx, '_original_cmdnx'):
+            # Prepend the original marker (e.g., 'cmd3x') to the remaining args
+            remaining_args = [ctx._original_cmdnx, *remaining_args]
+            # Clean up the context attribute
+            delattr(ctx, '_original_cmdnx')
+
+        return cmd_name, cmd, remaining_args
+
     # == "config" commands ==
     # Commands to interact with the configuration files.
     
@@ -433,15 +590,44 @@ class ASlurm(click.RichGroup):
     
     # == "cmd" commands ==
     # Commands to actually pass custom things to be scheduled in slurm.
-    
+    # Note: The cmdNx syntax (e.g., cmd3x, cmd5) is handled by get_command() and
+    # resolve_command() which route cmdNx to this handler with the marker in args.
+
     @click.command('cmd',
-                   context_settings=dict(ignore_unknown_options=True, allow_extra_args=True), 
-                   short_help='Add custom commands to be scheduled in SLURM.')
+                   context_settings=dict(ignore_unknown_options=True, allow_extra_args=True),
+                   short_help='Add custom commands to be scheduled in SLURM. Supports cmdNx syntax for repetition.')
     @click.argument('args', nargs=-1, type=click.UNPROCESSED)
     @click.pass_obj
     def cmd_command(self, args):
         """
         Add custom commands to be scheduled in SLURM.
+
+        This command accepts one or more shell commands to be scheduled as SLURM jobs.
+        Multiple commands can be specified by using multiple 'cmd' markers, and commands
+        can be repeated using the 'cmdNx' syntax.
+
+        Command Syntax:
+            cmd <command>           Execute <command> once
+            cmdN <command>          Execute <command> N times (e.g., cmd3 for 3 times)
+            cmdNx <command>         Same as cmdN (e.g., cmd3x for 3 times)
+
+        Examples:
+            # Single command
+            aslurmx -cn config cmd python train.py
+
+            # Multiple commands
+            aslurmx -cn config cmd python setup.py cmd python train.py cmd python eval.py
+
+            # Repeat a command 5 times
+            aslurmx -cn config cmd5x python train.py --seed=$RANDOM
+
+            # Mix regular and repeated commands
+            aslurmx -cn config cmd python setup.py cmd3x python train.py cmd python eval.py
+
+        Notes:
+            - The cmdNx syntax is resolved by ASlurm.get_command() and ASlurm.resolve_command()
+            - Commands are processed by extract_commands_from_args() which handles repetition
+            - All commands after 'cmd' markers are captured, including flags and arguments
         """
         
         # Combine known and unknown args
@@ -460,8 +646,12 @@ class ASlurm(click.RichGroup):
         # 2) config loading
         # Here we want to load the config that is specified by the user via the `-cn` option.
         # We search in all of the config source paths for a file with the given name.
+        # If no config was specified, we try to auto-detect it from the hostname.
 
-        # This method will load the config object based on the given config name from one of the 
+        if self.options['config_name'] is None:
+            self.options['config_name'] = self.detect_config_from_hostname()
+
+        # This method will load the config object based on the given config name from one of the
         # available config source paths.
         config: Config = self.load_config(config_name=self.options['config_name'])
         click.echo(f'✅ loaded config: {self.options["config_name"]}')
@@ -540,12 +730,15 @@ class ASlurm(click.RichGroup):
             with open(resume_path, 'w') as resume_file:
                 resume_file.write(resume_content)
                 
-            # After writing the files - only if this is NOT a dry run - we use subprocess to actually start 
+            # After writing the files - only if this is NOT a dry run - we use subprocess to actually start
             # the job using sbatch.
             if not self.options['dry_run']:
-                
+
                 try:
-                    sbatch_command = ['sbatch', main_path]
+                    sbatch_command = ['sbatch']
+                    if self.options.get('exclude'):
+                        sbatch_command.append(f'--exclude={self.options["exclude"]}')
+                    sbatch_command.append(main_path)
                     result = subprocess.run(sbatch_command, capture_output=True, text=True, check=True)
 
                     output = result.stdout
@@ -568,7 +761,70 @@ class ASlurm(click.RichGroup):
     # == Helper methods ==
     # The following methods do not implement any commands but rather provide utility functions
     # that are used by the commands above.
-        
+
+    def detect_config_from_hostname(self) -> str:
+        """
+        Detect the appropriate config name based on the current hostname.
+
+        Uses regex patterns defined in general_config.hostname_config_mappings to match
+        the current machine's hostname against known cluster patterns.
+
+        Returns:
+            str: The config name that matches the current hostname.
+
+        Raises:
+            click.ClickException: If no matching config is found or multiple configs match.
+
+        Example:
+            # In general_config.yaml:
+            # hostname_config_mappings:
+            #   "^hkn.*": "haicore_1gpu"
+            #   "^uc2n.*": "bwuni_1gpu"
+
+            >>> self.detect_config_from_hostname()  # On machine "hkn1234"
+            'haicore_1gpu'
+        """
+        try:
+            result = subprocess.run(
+                ['hostname'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            hostname = result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            raise click.ClickException(f"Failed to get hostname: {e}")
+
+        hostname_mappings = self.general_config.hostname_config_mappings
+        if not hostname_mappings:
+            raise click.ClickException(
+                "No hostname_config_mappings defined in general_config.yaml. "
+                "Please specify a config explicitly with -cn/--config-name."
+            )
+
+        matches: list[tuple[str, str]] = []
+        for pattern, config_name in hostname_mappings.items():
+            if re.match(pattern, hostname):
+                matches.append((pattern, config_name))
+
+        if len(matches) == 0:
+            raise click.ClickException(
+                f"No config found for hostname '{hostname}'. "
+                f"Please specify a config explicitly with -cn/--config-name, "
+                f"or add a mapping to general_config.yaml."
+            )
+
+        if len(matches) > 1:
+            matched_configs = ', '.join(f"'{m[1]}' (pattern: {m[0]})" for m in matches)
+            raise click.ClickException(
+                f"Multiple configs match hostname '{hostname}': {matched_configs}. "
+                f"Please specify a config explicitly with -cn/--config-name."
+            )
+
+        config_name = matches[0][1]
+        click.echo(f"Auto-detected config '{config_name}' for hostname '{hostname}'")
+        return config_name
+
     def discover_venv(self, path: str) -> str | None:
         """
         Discover and return the path to a virtual environment folder within the specified directory.
@@ -635,48 +891,100 @@ class ASlurm(click.RichGroup):
             
         # No virtual environment found
         return None
-        
+
+    def _parse_cmd_marker(self, arg: str) -> tuple[bool, int]:
+        """
+        Parse a potential command marker and return (is_cmd, repetition_count).
+
+        Supports the following formats:
+            - "cmd"     : Single command (repetition = 1)
+            - "cmd3"    : Repeat command 3 times
+            - "cmd3x"   : Repeat command 3 times (alternative syntax)
+
+        Args:
+            arg (str): The argument string to parse.
+
+        Returns:
+            tuple[bool, int]: (True, N) if arg is a cmd marker with N repetitions,
+                              (False, 0) otherwise.
+
+        Example:
+            >>> self._parse_cmd_marker("cmd")
+            (True, 1)
+            >>> self._parse_cmd_marker("cmd3x")
+            (True, 3)
+            >>> self._parse_cmd_marker("python")
+            (False, 0)
+        """
+        # Pattern explanation:
+        # - ^cmd        : starts with "cmd"
+        # - (?:(\d+)x?)?: optionally followed by digits (captured) and optional 'x'
+        # This ensures 'cmdx' is rejected (x requires a preceding number)
+        match = re.match(r'^cmd(?:(\d+)x?)?$', arg)
+        if match:
+            repetition = int(match.group(1)) if match.group(1) else 1
+            return True, repetition
+        return False, 0
+
     def extract_commands_from_args(self, args: list[str]) -> list[str]:
         """
-        Extracts individual command strings from a list of arguments, where each command is prefixed by the keyword "cmd".
-        This method scans through the provided list of arguments (`args`), searching for occurrences of the string "cmd".
-        For each "cmd" found, it collects all subsequent arguments up to the next "cmd" or the end of the list, and joins them
-        into a single command string separated by spaces. Each such command string is added to the returned list.
-        
+        Extracts individual command strings from a list of arguments, where each command
+        is prefixed by a "cmd" marker with optional repetition syntax.
+
+        This method scans through the provided list of arguments (`args`), searching for
+        command markers. For each marker found, it collects all subsequent arguments up to
+        the next marker or the end of the list, joins them into a single command string,
+        and repeats that command according to the repetition count.
+
+        Supported marker formats:
+            - "cmd"     : Single command (repetition = 1)
+            - "cmd3"    : Repeat command 3 times
+            - "cmd3x"   : Repeat command 3 times (alternative syntax)
+
         Args:
-            args (list[str]): A list of strings representing arguments, where each command is introduced by the keyword "cmd".
-                              For example: ["cmd", "echo", "hello", "cmd", "ls", "-l"]
+            args (list[str]): A list of strings representing arguments, where each command
+                              is introduced by a "cmd" marker.
+                              Example: ["cmd", "echo", "hello", "cmd3x", "python", "train.py"]
+
         Returns:
-            list[str]: A list of command strings, each assembled from the arguments following a "cmd" keyword up to the next "cmd"
-                       or the end of the list. Empty commands (i.e., "cmd" not followed by any arguments) are ignored.
+            list[str]: A list of command strings, with repeated commands expanded.
+                       Empty commands (i.e., markers not followed by any arguments) are ignored.
+
         Example:
             >>> extract_commands_from_args(["cmd", "echo", "hello", "cmd", "ls", "-l"])
             ['echo hello', 'ls -l']
+            >>> extract_commands_from_args(["cmd2x", "python", "train.py"])
+            ['python train.py', 'python train.py']
+            >>> extract_commands_from_args(["cmd", "task1", "cmd3", "task2"])
+            ['task1', 'task2', 'task2', 'task2']
+
         Notes:
-            - If "cmd" appears consecutively (e.g., ["cmd", "cmd", "ls"]), empty commands are ignored.
-            - Arguments before the first "cmd" are ignored.
-            - The method does not validate the content of the commands, only their extraction based on the "cmd" delimiter.
+            - If markers appear consecutively (e.g., ["cmd", "cmd", "ls"]), empty commands are ignored.
+            - Arguments before the first marker are ignored.
+            - The method does not validate the content of the commands.
         """
-        # In this list we will store all the individual assembled commands that are found 
-        # in the argument list
         commands: list[str] = []
-        
-        # We iterate through the arguments, as soon as we find a "cmd" argument we start collecting
-        # all the following arguments until we find the next "cmd" argument or reach the end of the list.
-        # We combine all the arguments in between into a single command string by inserting whitespaces.
+
         i = 0
         while i < len(args):
-            if args[i] == "cmd":
+            is_cmd, repetition = self._parse_cmd_marker(args[i])
+            if is_cmd:
+                # Find the end of this command (next cmd marker or end of args)
                 j = i + 1
-                while j < len(args) and args[j] != "cmd":
+                while j < len(args) and not self._parse_cmd_marker(args[j])[0]:
                     j += 1
-                command = " ".join(args[i+1:j])
+
+                # Build the command string from arguments between markers
+                command = " ".join(args[i + 1 : j])
+
+                # Add the command `repetition` times
                 if command.strip():
-                    commands.append(command)
+                    commands.extend([command] * repetition)
+
                 i = j
             else:
                 i += 1
-                
+
         return commands
 
     def load_config(self, config_name: str) -> Config:
@@ -842,6 +1150,7 @@ class ASlurmSubmitter:
         randomize (bool): Whether to randomize command order before batching
         gpus_per_task (int | None): Number of GPUs to assign per command (None = no GPU assignment)
         num_gpus (int | None): Total number of GPUs available for distribution
+        exclude (str | None): Comma-separated list of nodes to exclude from job allocation
         logger (logging.Logger): Logger instance for operation tracking
         commands (list[str]): Internal queue of commands awaiting submission
         options (dict): Internal options dictionary for CLI interface
@@ -864,6 +1173,7 @@ class ASlurmSubmitter:
                  parallel: bool = False,
                  gpus_per_task: int | None = None,
                  num_gpus: int | None = None,
+                 exclude: str | None = None,
                  ):
         """
         Initialize an ASlurmSubmitter instance with the specified configuration and options.
@@ -921,6 +1231,11 @@ class ASlurmSubmitter:
                                             Used for validation and ensuring commands don't exceed
                                             available GPU resources.
 
+            exclude (str | None, optional): Comma-separated list of nodes to exclude from job allocation.
+                                           Defaults to None (no exclusions).
+                                           Passed directly to sbatch --exclude option.
+                                           Example: 'node01,node02' excludes those specific nodes.
+
         Raises:
             FileNotFoundError: If the specified config_name does not exist in any config directory
             PermissionError: If archive_path is not writable
@@ -968,6 +1283,7 @@ class ASlurmSubmitter:
         self.parallel = parallel
         self.gpus_per_task = gpus_per_task
         self.num_gpus = num_gpus
+        self.exclude = exclude
 
         ## --- computed properties ---
 
@@ -984,6 +1300,7 @@ class ASlurmSubmitter:
             'max_tasks':            None,
             'archive_path':         archive_path,
             'dry_run':              dry_run,
+            'exclude':              exclude,
             'version':              False,
         }
         self.cli = ASlurm()
@@ -1359,6 +1676,9 @@ class ASlurmSubmitter:
     'If not set, the current working directory from which the command is run will be used.'
 ))
 @click.option('--dry-run', '-d', is_flag=True, help='Do not actually submit the jobs, just print the commands that would be run.')
+@click.option('--exclude', '-x', type=str, default=None, help=(
+    'Comma-separated list of nodes to exclude from the job allocation (passed to sbatch --exclude).'
+))
 @click.option('--version', '-v', is_flag=True, help='Show the version.')
 @click.pass_context
 def aslurm(ctx: click.Context,
@@ -1370,6 +1690,7 @@ def aslurm(ctx: click.Context,
            max_tasks: int | None,
            archive_path: str,
            dry_run: bool,
+           exclude: str | None,
            version: bool,
            ) -> None:        
 
@@ -1385,15 +1706,16 @@ def aslurm(ctx: click.Context,
         'config_name':          config_name,
         'overwrite_fillers':    overwrite_fillers,
         'same':                 same,
-        'gpus_per_task':        gpus_per_task, 
+        'gpus_per_task':        gpus_per_task,
         'num_gpus':             num_gpus,
         'max_tasks':            max_tasks,
         'archive_path':         archive_path,
         'dry_run':              dry_run,
+        'exclude':              exclude,
         'version':              version
     }
     ctx.command.options.update(options)
-        
+
 
 if __name__ == '__main__':
     aslurm()

@@ -737,3 +737,282 @@ class TestASlurmSubmitter:
             gpu3_pattern = r'CUDA_VISIBLE_DEVICES=3.*model3.*model7.*model11.*model15'
             assert re.search(gpu3_pattern, custom_section, re.DOTALL), \
                 "GPU 3 should run commands 3, 7, 11, 15 sequentially"
+
+
+class TestCommandParsing:
+    """Test cases for command parsing including the cmdNx repetition syntax."""
+
+    @pytest.fixture
+    def cli(self):
+        """Fixture that provides an ASlurm CLI instance."""
+        from auto_slurm.aslurmx import ASlurm
+        return ASlurm()
+
+    # --- Tests for _parse_cmd_marker helper ---
+
+    def test_parse_cmd_marker_basic_cmd(self, cli):
+        """Test that 'cmd' is recognized with repetition count of 1."""
+        is_cmd, repetition = cli._parse_cmd_marker('cmd')
+        assert is_cmd is True
+        assert repetition == 1
+
+    def test_parse_cmd_marker_cmd_with_number(self, cli):
+        """Test that 'cmd3' is recognized with repetition count of 3."""
+        is_cmd, repetition = cli._parse_cmd_marker('cmd3')
+        assert is_cmd is True
+        assert repetition == 3
+
+    def test_parse_cmd_marker_cmd_with_number_and_x(self, cli):
+        """Test that 'cmd5x' is recognized with repetition count of 5."""
+        is_cmd, repetition = cli._parse_cmd_marker('cmd5x')
+        assert is_cmd is True
+        assert repetition == 5
+
+    def test_parse_cmd_marker_large_number(self, cli):
+        """Test that large repetition counts work correctly."""
+        is_cmd, repetition = cli._parse_cmd_marker('cmd100x')
+        assert is_cmd is True
+        assert repetition == 100
+
+    def test_parse_cmd_marker_non_cmd_string(self, cli):
+        """Test that non-cmd strings are rejected."""
+        is_cmd, repetition = cli._parse_cmd_marker('python')
+        assert is_cmd is False
+        assert repetition == 0
+
+    def test_parse_cmd_marker_cmd_like_string(self, cli):
+        """Test that strings starting with 'cmd' but not matching pattern are rejected."""
+        # 'command' should not match
+        is_cmd, repetition = cli._parse_cmd_marker('command')
+        assert is_cmd is False
+        assert repetition == 0
+
+    def test_parse_cmd_marker_cmd_with_invalid_suffix(self, cli):
+        """Test that cmd with invalid suffix is rejected."""
+        # 'cmdabc' should not match
+        is_cmd, repetition = cli._parse_cmd_marker('cmdabc')
+        assert is_cmd is False
+        assert repetition == 0
+
+    def test_parse_cmd_marker_cmd_with_x_only(self, cli):
+        """Test that 'cmdx' (x without number) is rejected."""
+        is_cmd, repetition = cli._parse_cmd_marker('cmdx')
+        assert is_cmd is False
+        assert repetition == 0
+
+    # --- Tests for extract_commands_from_args ---
+
+    def test_extract_commands_basic_single_cmd(self, cli):
+        """Test extracting a single basic command."""
+        args = ['cmd', 'echo', 'hello']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['echo hello']
+
+    def test_extract_commands_multiple_cmds(self, cli):
+        """Test extracting multiple commands."""
+        args = ['cmd', 'echo', 'hello', 'cmd', 'ls', '-l']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['echo hello', 'ls -l']
+
+    def test_extract_commands_cmd2x_repetition(self, cli):
+        """Test that cmd2x repeats the command twice."""
+        args = ['cmd2x', 'python', 'train.py']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['python train.py', 'python train.py']
+
+    def test_extract_commands_cmd3_repetition(self, cli):
+        """Test that cmd3 (without x) repeats the command 3 times."""
+        args = ['cmd3', 'python', 'script.py']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['python script.py'] * 3
+
+    def test_extract_commands_cmd5x_repetition(self, cli):
+        """Test that cmd5x repeats the command 5 times."""
+        args = ['cmd5x', 'echo', 'test']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['echo test'] * 5
+
+    def test_extract_commands_mixed_cmds_and_repetitions(self, cli):
+        """Test mixing regular cmds with repeated cmds."""
+        args = ['cmd', 'task1', 'cmd3x', 'task2', 'cmd', 'task3']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['task1', 'task2', 'task2', 'task2', 'task3']
+
+    def test_extract_commands_multiple_repetitions(self, cli):
+        """Test multiple repeated commands in sequence."""
+        args = ['cmd2x', 'taskA', 'cmd3x', 'taskB']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['taskA', 'taskA', 'taskB', 'taskB', 'taskB']
+
+    def test_extract_commands_empty_args(self, cli):
+        """Test that empty args returns empty list."""
+        args = []
+        result = cli.extract_commands_from_args(args)
+        assert result == []
+
+    def test_extract_commands_no_cmd_marker(self, cli):
+        """Test that args without cmd markers return empty list."""
+        args = ['python', 'train.py', '--epochs', '10']
+        result = cli.extract_commands_from_args(args)
+        assert result == []
+
+    def test_extract_commands_consecutive_markers(self, cli):
+        """Test that consecutive cmd markers without content are ignored."""
+        args = ['cmd', 'cmd', 'echo', 'hello']
+        result = cli.extract_commands_from_args(args)
+        # First 'cmd' has no content (followed by another cmd), second has 'echo hello'
+        assert result == ['echo hello']
+
+    def test_extract_commands_trailing_cmd(self, cli):
+        """Test that trailing cmd without content is handled."""
+        args = ['cmd', 'echo', 'hello', 'cmd']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['echo hello']
+
+    def test_extract_commands_complex_command_with_args(self, cli):
+        """Test extracting commands with complex arguments."""
+        args = ['cmd', 'python', 'train.py', '--lr=0.01', '--epochs', '100', '--model', 'resnet50']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['python train.py --lr=0.01 --epochs 100 --model resnet50']
+
+    def test_extract_commands_repeated_complex_command(self, cli):
+        """Test repeating a complex command multiple times."""
+        args = ['cmd3x', 'python', 'train.py', '--seed=$RANDOM']
+        result = cli.extract_commands_from_args(args)
+        expected = ['python train.py --seed=$RANDOM'] * 3
+        assert result == expected
+
+    def test_extract_commands_preserves_quotes(self, cli):
+        """Test that quoted strings are preserved in commands."""
+        args = ['cmd', 'echo', '"hello world"']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['echo "hello world"']
+
+    def test_extract_commands_args_before_first_cmd_ignored(self, cli):
+        """Test that arguments before the first cmd marker are ignored."""
+        args = ['ignored', 'also_ignored', 'cmd', 'actual', 'command']
+        result = cli.extract_commands_from_args(args)
+        assert result == ['actual command']
+
+
+class TestCmdNxCLIIntegration:
+    """Integration tests for cmdNx syntax through the CLI.
+
+    The cmdNx syntax (e.g., cmd3x, cmd5) is handled by ASlurm.get_command() and
+    ASlurm.resolve_command() which recognize the pattern and route to the 'cmd'
+    handler while preserving the repetition information.
+
+    This means cmdNx can be used as the FIRST command - no need to start with 'cmd'.
+    """
+
+    def test_cli_cmd3x_as_first_command(self):
+        """Test that cmd3x works as the first (and only) command marker."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            # cmdNx as the FIRST command - this should work with the Click-native approach
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',  # dry run
+                'cmd3x', 'python', 'train.py'
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            # Check that 3 commands were prepared
+            assert 'preparing to submit 3 commands' in result.output
+
+    def test_cli_cmd5_without_x_suffix(self):
+        """Test that cmd5 (without x) works as the first command."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                'cmd5', 'echo', 'hello'
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            # Check that 5 commands were prepared
+            assert 'preparing to submit 5 commands' in result.output
+
+    def test_cli_mixed_cmd_and_cmdNx(self):
+        """Test mixing regular cmd with cmdNx syntax."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                '-mt', '10',  # High max_tasks so all go in one job
+                'cmd', 'echo', 'first',
+                'cmd2x', 'echo', 'repeated',
+                'cmd', 'echo', 'last'
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            # Should have 4 commands total: 1 + 2 + 1
+            assert 'preparing to submit 4 commands' in result.output
+
+    def test_cli_cmd5x_script_content(self):
+        """Test that cmd5x produces correct script content."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                '-s',  # Same job for all commands
+                'cmd5x', 'python', 'my_script.py'
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            # Find and read the main script
+            aslurm_path = os.path.join(temp_path, '.aslurm')
+            main_scripts = []
+            for root, _, files in os.walk(aslurm_path):
+                main_scripts.extend([
+                    os.path.join(root, f) for f in files
+                    if f.startswith('main_') and f.endswith('.sh')
+                ])
+
+            assert len(main_scripts) >= 1, "No main script found"
+
+            with open(main_scripts[0], 'r') as f:
+                script_content = f.read()
+
+            # The command should appear 5 times (joined with ';' since no GPU assignment)
+            # Count occurrences of the command
+            assert script_content.count('python my_script.py') == 5, \
+                "Command should appear exactly 5 times in the script"
+
+    @pytest.mark.parametrize('repetition', [2, 3, 5, 10])
+    def test_cli_various_repetition_counts_as_first_command(self, repetition):
+        """Test various repetition counts work correctly as the first command."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                f'cmd{repetition}x', 'echo', 'test'
+            ])
+            assert result.exit_code == 0, f"Command failed for cmd{repetition}x: {result.output}"
+            assert f'preparing to submit {repetition} commands' in result.output
+
+    def test_cli_cmdNx_followed_by_regular_cmd(self):
+        """Test cmdNx as first command followed by regular cmd."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                '-mt', '10',
+                'cmd3x', 'python', 'train.py',
+                'cmd', 'python', 'eval.py'
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            # Should have 4 commands total: 3 + 1
+            assert 'preparing to submit 4 commands' in result.output
