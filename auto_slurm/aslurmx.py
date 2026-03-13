@@ -725,6 +725,7 @@ class ASlurm(click.RichGroup):
                 options=self.options,
                 main_template=TEMPLATE_ENV.get_template('main.sh.j2'),
                 resume_template=TEMPLATE_ENV.get_template('resume.sh.j2'),
+                resume_script_name=f"resume_{job_index}.sh",
             )
             
             # Now we actually write the files to the scripts folder.
@@ -815,6 +816,7 @@ class ASlurm(click.RichGroup):
             options=self.options,
             main_template=TEMPLATE_ENV.get_template('main.sh.j2'),
             resume_template=TEMPLATE_ENV.get_template('resume.sh.j2'),
+            resume_script_name="resume_interactive.sh",
         )
 
         main_path = os.path.join(scripts_path, 'main_interactive.sh')

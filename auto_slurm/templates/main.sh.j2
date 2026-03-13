@@ -7,9 +7,9 @@ sleep 10
 
 # This is the absolute path to the folder in which the current script is located.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if compgen -G "${SCRIPT_DIR}/${SLURM_JOB_ID}_*.resume" > /dev/null; then
+if compgen -G "./.aslurm/${SLURM_JOB_ID}_*.resume" > /dev/null; then
 	export PREVIOUS_SLURM_ID=${SLURM_JOB_ID}
-	sbatch ${SCRIPT_DIR}/resume_0.sh
+	sbatch ${SCRIPT_DIR}/{{ resume_script_name }}
 fi
 
 {% endblock %}

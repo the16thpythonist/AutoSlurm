@@ -38,9 +38,11 @@ def test_create_slurm_jobs_basic():
     with open(os.path.join(ARTIFACTS_PATH, "resume_basic.sh"), "w") as f:
         f.write(resume_script)
 
-    # Check that commands are in the output
+    # Check that commands are in the main script
     assert "echo 1" in main_script and "echo 2" in main_script
-    assert "echo 1" in resume_script and "echo 2" in resume_script
+    # Resume script should use eval/cat, not the original commands
+    assert "eval" in resume_script and "cat" in resume_script
+    assert "_0.resume" in resume_script and "_1.resume" in resume_script
 
 
 def test_create_slurm_jobs_no_gpus():
@@ -66,7 +68,8 @@ def test_create_slurm_jobs_no_gpus():
         f.write(resume_script)
 
     assert "run something" in main_script
-    assert "run something" in resume_script
+    # Resume script should use eval/cat, not the original commands
+    assert "eval" in resume_script and "cat" in resume_script
 
 
 def test_create_slurm_jobs_empty_commands():
@@ -480,5 +483,210 @@ class TestExpandCommands:
         # Middle should be the expanded commands
         assert result[1] == "python train.py --lr=0.1"
         assert result[2] == "python train.py --lr=0.01"
+
+
+class TestResumeScriptRendering:
+    """
+    Layer 1: Template rendering tests for the resume/chain job feature.
+
+    These tests verify that create_slurm_jobs() produces correct main and resume
+    scripts. The resume script should:
+    - NOT contain the original commands
+    - Instead use eval/cat to read .resume files written by write_resume_file()
+    - Preserve GPU assignment (CUDA_VISIBLE_DEVICES) and task indices
+    - Self-chain: check for new .resume files and resubmit itself
+    - Have the same SBATCH directives as the main script
+
+    Expected interface change: create_slurm_jobs() gains a `resume_script_name`
+    parameter (str) so the main template can reference the correct resume script
+    and the resume template can reference itself for self-chaining.
+    """
+
+    def _render(self, commands, options=None, fillers=None, resume_script_name="resume_0.sh"):
+        """Helper to render main + resume scripts with sensible defaults."""
+        main_template = TEMPLATE_ENV.get_template("main.sh.j2")
+        resume_template = TEMPLATE_ENV.get_template("resume.sh.j2")
+        return create_slurm_jobs(
+            fillers=fillers or {"job_name": "test_job"},
+            commands=commands,
+            options=options or {},
+            main_template=main_template,
+            resume_template=resume_template,
+            resume_script_name=resume_script_name,
+        )
+
+    # --- Resume script: eval/cat commands ---
+
+    def test_resume_script_reads_from_resume_files(self):
+        """Resume script should use eval + cat to read commands from .resume files."""
+        _, resume_script = self._render(
+            commands=["python train.py --lr=0.01", "python train.py --lr=0.001"],
+        )
+
+        with open(os.path.join(ARTIFACTS_PATH, "resume_eval_cat.sh"), "w") as f:
+            f.write(resume_script)
+
+        assert "eval" in resume_script, "Resume script should use 'eval' to execute resume commands"
+        assert "cat" in resume_script, "Resume script should use 'cat' to read .resume files"
+        assert "PREVIOUS_SLURM_ID" in resume_script, \
+            "Resume script should reference PREVIOUS_SLURM_ID"
+
+    def test_resume_script_has_correct_task_indices(self):
+        """Resume script should reference a .resume file for each task index."""
+        _, resume_script = self._render(
+            commands=["echo task0", "echo task1", "echo task2"],
+        )
+
+        for i in range(3):
+            assert f"_{i}.resume" in resume_script, \
+                f"Resume script should reference .resume file for task index {i}"
+
+    def test_resume_script_does_not_contain_original_commands(self):
+        """Resume script should NOT contain the original command strings."""
+        _, resume_script = self._render(
+            commands=["python train.py --very_unique_flag_12345"],
+        )
+
+        assert "very_unique_flag_12345" not in resume_script, \
+            "Resume script should not contain original command text; it should use eval/cat"
+
+    def test_resume_single_command(self):
+        """Resume script should work correctly with a single command."""
+        _, resume_script = self._render(commands=["echo hello"])
+
+        assert "eval" in resume_script
+        assert "_0.resume" in resume_script
+
+    def test_resume_many_commands(self):
+        """Resume script should handle many commands, each with its own .resume reference."""
+        commands = [f"python run_{i}.py" for i in range(8)]
+        _, resume_script = self._render(commands=commands)
+
+        for i in range(8):
+            assert f"_{i}.resume" in resume_script, \
+                f"Missing .resume reference for task index {i}"
+
+    # --- Resume script: self-chaining ---
+
+    def test_resume_script_self_chains(self):
+        """Resume script should check for new .resume files and resubmit itself."""
+        _, resume_script = self._render(
+            commands=["echo hello"],
+            resume_script_name="resume_0.sh",
+        )
+
+        assert "compgen" in resume_script, \
+            "Resume script should use compgen to check for .resume files"
+        assert ".resume" in resume_script, \
+            "Resume script should check for .resume file pattern"
+        assert "sbatch" in resume_script, \
+            "Resume script should call sbatch to resubmit"
+        assert "resume_0.sh" in resume_script, \
+            "Resume script should reference itself for chaining"
+
+    def test_resume_script_self_chains_with_different_index(self):
+        """Resume script for job index 2 should chain to resume_2.sh, not resume_0.sh."""
+        _, resume_script = self._render(
+            commands=["echo hello"],
+            resume_script_name="resume_2.sh",
+        )
+
+        assert "resume_2.sh" in resume_script, \
+            "resume_2.sh should reference itself, not resume_0.sh"
+
+    # --- Main script: correct resume reference ---
+
+    def test_main_script_references_correct_resume_filename(self):
+        """Main script should reference the specific resume filename, not a hardcoded one."""
+        main_0, _ = self._render(
+            commands=["echo hello"],
+            resume_script_name="resume_0.sh",
+        )
+        assert "resume_0.sh" in main_0
+
+        main_1, _ = self._render(
+            commands=["echo hello"],
+            resume_script_name="resume_1.sh",
+        )
+        assert "resume_1.sh" in main_1
+
+        main_3, _ = self._render(
+            commands=["echo hello"],
+            resume_script_name="resume_3.sh",
+        )
+        assert "resume_3.sh" in main_3
+
+    # --- Resume script: GPU assignment ---
+
+    def test_resume_script_has_gpu_assignment(self):
+        """When gpus_per_task is set, resume script should assign CUDA_VISIBLE_DEVICES."""
+        _, resume_script = self._render(
+            commands=["python train1.py", "python train2.py"],
+            options={"gpus_per_task": 1},
+        )
+
+        with open(os.path.join(ARTIFACTS_PATH, "resume_gpu.sh"), "w") as f:
+            f.write(resume_script)
+
+        assert "CUDA_VISIBLE_DEVICES=0" in resume_script, \
+            "GPU 0 assignment not found in resume script"
+        assert "CUDA_VISIBLE_DEVICES=1" in resume_script, \
+            "GPU 1 assignment not found in resume script"
+
+    def test_resume_script_no_gpu_when_not_configured(self):
+        """When gpus_per_task is not set, resume script should not set CUDA_VISIBLE_DEVICES."""
+        _, resume_script = self._render(
+            commands=["python train1.py", "python train2.py"],
+            options={},
+        )
+
+        assert "CUDA_VISIBLE_DEVICES" not in resume_script
+
+    def test_resume_script_multi_gpu_per_task(self):
+        """With gpus_per_task=2, each resumed task should get 2 GPUs."""
+        _, resume_script = self._render(
+            commands=["python train1.py", "python train2.py"],
+            options={"gpus_per_task": 2},
+        )
+
+        # Task 0 gets GPUs 0,1 and task 1 gets GPUs 2,3
+        assert "CUDA_VISIBLE_DEVICES=0,1" in resume_script
+        assert "CUDA_VISIBLE_DEVICES=2,3" in resume_script
+
+    # --- Resume script: SLURM_SUBMIT_TASK_INDEX ---
+
+    def test_resume_script_has_task_index_env_var(self):
+        """Resume script should set SLURM_SUBMIT_TASK_INDEX for each resumed task."""
+        _, resume_script = self._render(
+            commands=["echo task0", "echo task1"],
+        )
+
+        assert "SLURM_SUBMIT_TASK_INDEX=0" in resume_script
+        assert "SLURM_SUBMIT_TASK_INDEX=1" in resume_script
+
+    # --- Resume script: SBATCH directives ---
+
+    def test_resume_script_has_matching_sbatch_directives(self):
+        """Resume script should have the same SBATCH directives as the main script."""
+        fillers = {
+            "job_name": "test_job",
+            "time": "02:00:00",
+            "mem": "16G",
+            "partition": "gpu",
+            "gres": "gpu:4",
+        }
+        main_script, resume_script = self._render(
+            commands=["echo hello"],
+            fillers=fillers,
+        )
+
+        with open(os.path.join(ARTIFACTS_PATH, "resume_sbatch.sh"), "w") as f:
+            f.write(resume_script)
+
+        assert "#!/bin/bash" in resume_script
+        assert "#SBATCH --time=02:00:00" in resume_script
+        assert "#SBATCH --mem=16G" in resume_script
+        assert "#SBATCH --partition=gpu" in resume_script
+        assert "#SBATCH --gres=gpu:4" in resume_script
 
 

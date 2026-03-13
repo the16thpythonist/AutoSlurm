@@ -427,9 +427,10 @@ def open_file_in_editor(file_path: str) -> None:
 def create_slurm_jobs(
     fillers: dict,
     commands: list[str],
-    options: dict[str, any], 
+    options: dict[str, any],
     main_template: j2.Template = TEMPLATE_ENV.get_template('main.sh.j2'),
     resume_template: j2.Template = TEMPLATE_ENV.get_template('resume.sh.j2'),
+    resume_script_name: str = "resume_0.sh",
 ) -> tuple[str, str]:
     """
     Generate SLURM job scripts for a batch of commands using Jinja2 templates.
@@ -477,14 +478,16 @@ def create_slurm_jobs(
         commands=commands,
         options=options,
         gpus=gpus,
+        resume_script_name=resume_script_name,
     )
-    
+
     resume_script_content: str = resume_template.render(
         fillers=fillers,
         commands=commands,
         options=options,
         gpus_per_task=gpus_per_task,
-        gpus=gpus
+        gpus=gpus,
+        resume_script_name=resume_script_name,
     )
     
     return main_script_content, resume_script_content

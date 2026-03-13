@@ -41,10 +41,12 @@ export MKL_NUM_THREADS={{ fillers.num_threads }}
 export OPENBLAS_NUM_THREADS={{ fillers.num_threads }}
 {% endif %}
 
+{% block commands %}
 # Custom commands
 {% for command in commands %}
 SLURM_SUBMIT_TASK_INDEX={{ loop.index0 }} {% if options.get("gpus_per_task", None) is not none %}CUDA_VISIBLE_DEVICES={{ loop.index0 }}{% endif %} {{ command }} &>> slurm-${SLURM_JOB_ID}{%- if commands|length > 1 %}-{{ loop.index0 }}{% endif -%}.out &
 {%- endfor -%}
+{% endblock %}
 
 {%- block after %}
 # Additional steps after the commands

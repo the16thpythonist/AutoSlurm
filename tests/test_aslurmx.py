@@ -1016,3 +1016,201 @@ class TestCmdNxCLIIntegration:
 
             # Should have 4 commands total: 3 + 1
             assert 'preparing to submit 4 commands' in result.output
+
+
+class TestResumeJobsCLI:
+    """
+    Layer 2: CLI integration tests for resume/chain job functionality.
+
+    These tests invoke aslurmx via CliRunner with --dry-run and inspect the
+    generated script files on disk. No mocking needed — we rely on the dry-run
+    mode to skip sbatch submission and just check file content.
+
+    What we verify:
+    - A resume_N.sh file is created for every main_N.sh
+    - Resume scripts contain valid bash with SBATCH directives
+    - Resume scripts contain eval/cat logic (not original commands)
+    - With multiple jobs, each main_N.sh references its own resume_N.sh
+    - Each resume_N.sh self-chains (references itself, not resume_0.sh)
+    """
+
+    def _find_scripts(self, temp_path):
+        """Helper: walk .aslurm/ and return dicts of main and resume scripts keyed by index."""
+        aslurm_path = os.path.join(temp_path, '.aslurm')
+        main_scripts = {}
+        resume_scripts = {}
+        for root, _, files in os.walk(aslurm_path):
+            for f in files:
+                path = os.path.join(root, f)
+                if f.startswith('main_') and f.endswith('.sh'):
+                    index = f.replace('main_', '').replace('.sh', '')
+                    with open(path, 'r') as fh:
+                        main_scripts[index] = fh.read()
+                elif f.startswith('resume_') and f.endswith('.sh'):
+                    index = f.replace('resume_', '').replace('.sh', '')
+                    with open(path, 'r') as fh:
+                        resume_scripts[index] = fh.read()
+        return main_scripts, resume_scripts
+
+    def test_resume_scripts_created_alongside_main(self):
+        """Each main_N.sh should have a corresponding resume_N.sh in the same directory."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                'cmd', 'python train.py',
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            main_scripts, resume_scripts = self._find_scripts(temp_path)
+
+            assert len(main_scripts) >= 1, "No main scripts found"
+            assert set(main_scripts.keys()) == set(resume_scripts.keys()), (
+                f"Mismatch: main indices {set(main_scripts.keys())} "
+                f"vs resume indices {set(resume_scripts.keys())}"
+            )
+
+    def test_resume_script_is_valid_bash_with_sbatch(self):
+        """Resume scripts should start with shebang, contain SBATCH directives and resume logic."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                'cmd', 'python train.py',
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            _, resume_scripts = self._find_scripts(temp_path)
+            assert len(resume_scripts) >= 1, "No resume scripts found"
+
+            for index, content in resume_scripts.items():
+                assert content.strip().startswith('#!/bin/bash'), \
+                    f"resume_{index}.sh missing shebang"
+                assert '#SBATCH' in content, \
+                    f"resume_{index}.sh missing SBATCH directives"
+                assert 'eval' in content, \
+                    f"resume_{index}.sh missing eval command for reading .resume files"
+                assert 'PREVIOUS_SLURM_ID' in content, \
+                    f"resume_{index}.sh missing PREVIOUS_SLURM_ID reference"
+
+    def test_resume_script_does_not_contain_original_command(self):
+        """Resume scripts should use eval/cat, not the original command text."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                'cmd', 'python train_UNIQUE_MARKER_67890.py',
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            _, resume_scripts = self._find_scripts(temp_path)
+            for index, content in resume_scripts.items():
+                assert 'UNIQUE_MARKER_67890' not in content, \
+                    f"resume_{index}.sh should not contain the original command"
+
+    def test_multi_job_each_main_references_its_own_resume(self):
+        """With max-tasks=1, each main_N.sh should chain to resume_N.sh, not resume_0.sh."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                '-mt', '1',  # Force 1 task per job -> multiple jobs
+                'cmd', 'python train1.py',
+                'cmd', 'python train2.py',
+                'cmd', 'python train3.py',
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            main_scripts, resume_scripts = self._find_scripts(temp_path)
+
+            assert len(main_scripts) == 3, \
+                f"Expected 3 main scripts (one per task), found {len(main_scripts)}"
+            assert len(resume_scripts) == 3, \
+                f"Expected 3 resume scripts, found {len(resume_scripts)}"
+
+            # Each main_N.sh must reference resume_N.sh
+            for index, content in main_scripts.items():
+                expected_resume = f'resume_{index}.sh'
+                assert expected_resume in content, \
+                    f"main_{index}.sh should reference {expected_resume} for chaining"
+
+    def test_resume_scripts_self_chain(self):
+        """Each resume_N.sh should chain to itself (not to resume_0.sh) for infinite chaining."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                '-mt', '1',
+                'cmd', 'python train1.py',
+                'cmd', 'python train2.py',
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            _, resume_scripts = self._find_scripts(temp_path)
+            assert len(resume_scripts) == 2
+
+            for index, content in resume_scripts.items():
+                expected_self_ref = f'resume_{index}.sh'
+                assert expected_self_ref in content, \
+                    f"resume_{index}.sh should reference itself ({expected_self_ref}) for chaining"
+                assert 'compgen' in content, \
+                    f"resume_{index}.sh should use compgen to check for .resume files"
+                assert 'sbatch' in content, \
+                    f"resume_{index}.sh should call sbatch for self-chaining"
+
+    def test_single_job_resume_references(self):
+        """With a single job, main_0.sh chains to resume_0.sh, resume_0.sh chains to itself."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                'cmd', 'python train.py',
+                'cmd', 'python eval.py',
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            main_scripts, resume_scripts = self._find_scripts(temp_path)
+
+            # Single job should produce main_0.sh and resume_0.sh
+            assert '0' in main_scripts
+            assert '0' in resume_scripts
+
+            assert 'resume_0.sh' in main_scripts['0'], \
+                "main_0.sh should chain to resume_0.sh"
+            assert 'resume_0.sh' in resume_scripts['0'], \
+                "resume_0.sh should chain to itself"
+
+    def test_resume_script_task_indices_match_commands(self):
+        """Resume script for a 3-command job should reference task indices 0, 1, 2."""
+        with tempfile.TemporaryDirectory() as temp_path:
+            runner = CliRunner()
+            result = runner.invoke(aslurm, [
+                f'--archive-path={temp_path}',
+                '--config-name=haicore_1gpu',
+                '-d',
+                '-mt', '3',  # All 3 in one job
+                'cmd', 'python a.py',
+                'cmd', 'python b.py',
+                'cmd', 'python c.py',
+            ])
+            assert result.exit_code == 0, f"Command failed: {result.output}"
+
+            _, resume_scripts = self._find_scripts(temp_path)
+            assert '0' in resume_scripts
+
+            content = resume_scripts['0']
+            for i in range(3):
+                assert f'_{i}.resume' in content, \
+                    f"resume_0.sh should reference task index {i} .resume file"

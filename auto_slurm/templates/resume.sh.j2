@@ -1,3 +1,22 @@
 {% extends "base.sh.j2" %}
 
-{# The rest of your resume.sh.j2 content goes here #}
+{% block commands %}
+# Resume commands: read from .resume files written by the previous job
+{% for command in commands %}
+SLURM_SUBMIT_TASK_INDEX={{ loop.index0 }} {% if gpus[loop.index0] is defined %}CUDA_VISIBLE_DEVICES={{ gpus[loop.index0] }} {% endif %}eval `cat ./.aslurm/${PREVIOUS_SLURM_ID}_{{ loop.index0 }}.resume` &>> slurm-${SLURM_JOB_ID}{%- if commands|length > 1 %}-{{ loop.index0 }}{% endif -%}.out &
+{%- endfor %}
+{% endblock %}
+
+{% block after %}
+
+wait
+sleep 10
+
+# This is the absolute path to the folder in which the current script is located.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if compgen -G "./.aslurm/${SLURM_JOB_ID}_*.resume" > /dev/null; then
+	export PREVIOUS_SLURM_ID=${SLURM_JOB_ID}
+	sbatch ${SCRIPT_DIR}/{{ resume_script_name }}
+fi
+
+{% endblock %}
