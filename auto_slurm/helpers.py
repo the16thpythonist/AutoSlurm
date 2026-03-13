@@ -109,22 +109,24 @@ def split_top_level_commas(s: str) -> List[str]:
     parts = []
     current = []
     depth = 0
+    in_quotes = False
 
     for ch in s:
-        # Track nesting depth for all bracket types
-        if ch in "[{(":
-            depth += 1
-        elif ch in "]})":
-            depth -= 1
-            # Check for unbalanced closing bracket
-            if depth < 0:
-                raise ValueError("Unbalanced brackets")
-
-        # Split on comma only at top level (depth == 0)
-        elif ch == "," and depth == 0:
-            parts.append("".join(current).strip())
-            current = []
-            continue
+        if ch == '"' and depth == 0:
+            in_quotes = not in_quotes
+        elif not in_quotes:
+            # Track nesting depth for all bracket types
+            if ch in "[{(":
+                depth += 1
+            elif ch in "]})":
+                depth -= 1
+                # Check for unbalanced closing bracket
+                if depth < 0:
+                    raise ValueError("Unbalanced brackets")
+            elif ch == "," and depth == 0:
+                parts.append("".join(current).strip())
+                current = []
+                continue
 
         current.append(ch)
 
