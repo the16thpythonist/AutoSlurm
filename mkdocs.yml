@@ -5,6 +5,8 @@ repo_name: aimat-lab/AutoSlurm
 
 theme:
   name: material
+  logo: logo.png
+  favicon: logo.png
   features:
     - navigation.sections
     - navigation.expand
