@@ -30,6 +30,9 @@ dev = [
     "nox",
     "pytest",
 ]
+docs = [
+    "mkdocs-material",
+]
 
 [project.scripts]
 aslurm = "auto_slurm.aslurm:main"

@@ -1,0 +1,57 @@
+site_name: AutoSlurmX
+site_description: Automatically generate and submit SLURM job scripts for HPC clusters
+repo_url: https://github.com/aimat-lab/AutoSlurm
+repo_name: aimat-lab/AutoSlurm
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - content.code.select
+    - search.highlight
+    - search.suggest
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Usage:
+      - Single-Task Jobs: usage/single-task.md
+      - Multi-Task Jobs: usage/multi-task.md
+      - Sweeps: usage/sweeps.md
+      - Chain Jobs: usage/chain-jobs.md
+      - Interactive Jobs: usage/interactive.md
+  - Configuration: configuration.md
+  - Python API: python-api.md
+  - CLI Reference: cli-reference.md

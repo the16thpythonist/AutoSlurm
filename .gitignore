@@ -9,3 +9,4 @@ slurm-*
 _*
 uv.lock
 build/*
+site/
