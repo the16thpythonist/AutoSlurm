@@ -1,0 +1,12 @@
+import nox
+
+nox.options.default_venv_backend = "uv"
+
+PYTHON_VERSIONS = ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def tests(session: nox.Session) -> None:
+    """Run unit tests across Python versions (excluding integration tests)."""
+    session.install(".[dev]")
+    session.run("pytest", "-m", "not integration", *session.posargs)

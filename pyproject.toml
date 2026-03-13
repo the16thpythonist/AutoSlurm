@@ -25,6 +25,12 @@ dependencies = [
     "tqdm>=4.0.0,<=5.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "nox",
+    "pytest",
+]
+
 [project.scripts]
 aslurm = "auto_slurm.aslurm:main"
 aslurmx = "auto_slurm.aslurmx:aslurm"
