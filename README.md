@@ -1,5 +1,7 @@
 # AutoSlurm
 
+![Banner](banner.png)
+
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Version](https://img.shields.io/badge/Version-0.1.0-green)
